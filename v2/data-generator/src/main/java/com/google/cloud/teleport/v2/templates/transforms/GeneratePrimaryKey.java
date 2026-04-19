@@ -23,6 +23,7 @@ import com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorTable;
 import com.google.cloud.teleport.v2.templates.utils.Constants;
 import com.google.cloud.teleport.v2.templates.utils.DataGeneratorUtils;
+import com.google.cloud.teleport.v2.templates.utils.SeedUtils;
 import java.util.List;
 import java.util.Random;
 import java.util.stream.Collectors;
@@ -80,9 +81,13 @@ public class GeneratePrimaryKey
 
     @Setup
     public void setup() {
-      java.security.SecureRandom secureRandom = new java.security.SecureRandom();
-      faker = new Faker(new java.util.Random(secureRandom.nextLong()));
-      random = new java.util.Random(secureRandom.nextLong());
+      // Seed from multiple independent entropy sources (see SeedUtils javadoc). Using only
+      // `new SecureRandom().nextLong()` is unsafe on Dataflow: autoscaled worker VMs are cloned
+      // from the same image and can have correlated /dev/urandom state at the moment @Setup
+      // runs, which previously produced identical Faker sequences across workers and caused
+      // "PK already exists" errors during scale-up.
+      faker = new Faker(new java.util.Random(SeedUtils.generate()));
+      random = new java.util.Random(SeedUtils.generate());
 
       if (Constants.SINK_TYPE_MYSQL.equalsIgnoreCase(sinkType) && sinkOptionsPath != null) {
         try {

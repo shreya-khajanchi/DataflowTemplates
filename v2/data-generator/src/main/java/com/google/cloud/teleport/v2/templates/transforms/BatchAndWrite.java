@@ -26,6 +26,7 @@ import com.google.cloud.teleport.v2.templates.model.DataGeneratorSchema;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorTable;
 import com.google.cloud.teleport.v2.templates.utils.Constants;
 import com.google.cloud.teleport.v2.templates.utils.DataGeneratorUtils;
+import com.google.cloud.teleport.v2.templates.utils.SeedUtils;
 import com.google.cloud.teleport.v2.templates.writer.DataWriter;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -219,8 +220,11 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         }
       }
       if (this.faker == null) {
-        java.security.SecureRandom secureRandom = new java.security.SecureRandom();
-        this.faker = new Faker(new java.util.Random(secureRandom.nextLong()));
+        // Seed from multiple independent entropy sources (see SeedUtils javadoc). Using only
+        // `new SecureRandom().nextLong()` is unsafe on Dataflow: autoscaled worker VMs are
+        // cloned from the same image and can have correlated /dev/urandom state when @Setup
+        // runs, previously producing identical non-PK Faker values across workers as well.
+        this.faker = new Faker(new java.util.Random(SeedUtils.generate()));
       }
     }
 
