@@ -15,12 +15,13 @@
  */
 package com.google.cloud.teleport.v2.templates.dbutils.processor;
 
+import com.google.cloud.teleport.v2.spanner.migrations.connection.ConnectionHelperRequest;
+import com.google.cloud.teleport.v2.spanner.migrations.connection.IConnectionHelper;
+import com.google.cloud.teleport.v2.spanner.migrations.connection.JdbcConnectionHelper;
 import com.google.cloud.teleport.v2.spanner.migrations.shard.CassandraShard;
 import com.google.cloud.teleport.v2.spanner.migrations.shard.Shard;
 import com.google.cloud.teleport.v2.templates.constants.Constants;
 import com.google.cloud.teleport.v2.templates.dbutils.connection.CassandraConnectionHelper;
-import com.google.cloud.teleport.v2.templates.dbutils.connection.IConnectionHelper;
-import com.google.cloud.teleport.v2.templates.dbutils.connection.JdbcConnectionHelper;
 import com.google.cloud.teleport.v2.templates.dbutils.dao.source.CassandraDao;
 import com.google.cloud.teleport.v2.templates.dbutils.dao.source.IDao;
 import com.google.cloud.teleport.v2.templates.dbutils.dao.source.JdbcDao;
@@ -29,7 +30,6 @@ import com.google.cloud.teleport.v2.templates.dbutils.dml.IDMLGenerator;
 import com.google.cloud.teleport.v2.templates.dbutils.dml.MySQLDMLGenerator;
 import com.google.cloud.teleport.v2.templates.dbutils.dml.PostgreSQLDMLGenerator;
 import com.google.cloud.teleport.v2.templates.exceptions.UnsupportedSourceException;
-import com.google.cloud.teleport.v2.templates.models.ConnectionHelperRequest;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,7 +100,7 @@ public class SourceProcessorFactory {
                       null,
                       maxConnections,
                       driverMap.get(Constants.SOURCE_MYSQL),
-                      "SET SESSION net_read_timeout=1200", // To avoid timeouts at the network layer
+                      "SET SESSION net_read_timeout=1200", // Avoid network-layer timeouts.
                       "jdbc:mysql://"),
               Constants.SOURCE_POSTGRESQL,
               (shards, maxConnections) ->
@@ -118,7 +118,7 @@ public class SourceProcessorFactory {
                       null,
                       maxConnections,
                       driverMap.get(Constants.SOURCE_CASSANDRA),
-                      null, // No specific initialization query for Cassandra
+                      null, // No specific initialization query for Cassandra.
                       null));
 
   // for unit testing purposes
