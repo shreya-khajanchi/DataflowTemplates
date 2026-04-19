@@ -26,7 +26,6 @@ import com.google.cloud.teleport.v2.templates.model.DataGeneratorSchema;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorTable;
 import com.google.cloud.teleport.v2.templates.utils.Constants;
 import com.google.cloud.teleport.v2.templates.utils.DataGeneratorUtils;
-import com.google.cloud.teleport.v2.templates.utils.SeedUtils;
 import com.google.cloud.teleport.v2.templates.writer.DataWriter;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -66,10 +65,10 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
   private final PCollectionView<DataGeneratorSchema> schemaView;
 
   public BatchAndWrite(
-      String sinkType,
-      String sinkOptionsPath,
-      Integer batchSize,
-      PCollectionView<DataGeneratorSchema> schemaView) {
+          String sinkType,
+          String sinkOptionsPath,
+          Integer batchSize,
+          PCollectionView<DataGeneratorSchema> schemaView) {
     this.sinkType = sinkType;
     this.sinkOptionsPath = sinkOptionsPath;
     this.batchSize = batchSize;
@@ -79,9 +78,9 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
   @Override
   public PDone expand(PCollection<KV<String, Row>> input) {
     input.apply(
-        "BatchAndWriteFn",
-        ParDo.of(new BatchAndWriteFn(sinkType, sinkOptionsPath, batchSize, schemaView))
-            .withSideInputs(schemaView));
+            "BatchAndWriteFn",
+            ParDo.of(new BatchAndWriteFn(sinkType, sinkOptionsPath, batchSize, schemaView))
+                    .withSideInputs(schemaView));
     return PDone.in(input.getPipeline());
   }
 
@@ -128,51 +127,51 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     private transient int deleteQps;
 
     private static final org.slf4j.Logger LOG =
-        org.slf4j.LoggerFactory.getLogger(BatchAndWriteFn.class);
+            org.slf4j.LoggerFactory.getLogger(BatchAndWriteFn.class);
 
     private final Counter insertsGenerated =
-        Metrics.counter(BatchAndWriteFn.class, "insertsGenerated");
+            Metrics.counter(BatchAndWriteFn.class, "insertsGenerated");
     private final Counter updatesGenerated =
-        Metrics.counter(BatchAndWriteFn.class, "updatesGenerated");
+            Metrics.counter(BatchAndWriteFn.class, "updatesGenerated");
     private final Counter deletesGenerated =
-        Metrics.counter(BatchAndWriteFn.class, "deletesGenerated");
+            Metrics.counter(BatchAndWriteFn.class, "deletesGenerated");
     private final Counter batchesWritten = Metrics.counter(BatchAndWriteFn.class, "batchesWritten");
     private final Counter recordsWritten = Metrics.counter(BatchAndWriteFn.class, "recordsWritten");
 
     @StateId("activeKeys")
     private final StateSpec<MapState<String, Row>> activeKeysSpec =
-        StateSpecs.map(
-            org.apache.beam.sdk.coders.StringUtf8Coder.of(),
-            org.apache.beam.sdk.coders.SerializableCoder.of(Row.class));
+            StateSpecs.map(
+                    org.apache.beam.sdk.coders.StringUtf8Coder.of(),
+                    org.apache.beam.sdk.coders.SerializableCoder.of(Row.class));
 
     @StateId("eventQueue")
     private final StateSpec<MapState<Long, List<LifecycleEvent>>> eventQueueSpec =
-        StateSpecs.map(
-            org.apache.beam.sdk.coders.VarLongCoder.of(),
-            org.apache.beam.sdk.coders.ListCoder.of(
-                org.apache.beam.sdk.coders.SerializableCoder.of(LifecycleEvent.class)));
+            StateSpecs.map(
+                    org.apache.beam.sdk.coders.VarLongCoder.of(),
+                    org.apache.beam.sdk.coders.ListCoder.of(
+                            org.apache.beam.sdk.coders.SerializableCoder.of(LifecycleEvent.class)));
 
     @TimerId("eventTimer")
     private final TimerSpec eventTimerSpec = TimerSpecs.timer(TimeDomain.PROCESSING_TIME);
 
     @StateId("activeTimestamps")
     private final StateSpec<org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>>>
-        activeTimestampsSpec =
+            activeTimestampsSpec =
             StateSpecs.value(
-                org.apache.beam.sdk.coders.SerializableCoder.of(
-                    new org.apache.beam.sdk.values.TypeDescriptor<java.util.TreeSet<Long>>() {}));
+                    org.apache.beam.sdk.coders.SerializableCoder.of(
+                            new org.apache.beam.sdk.values.TypeDescriptor<java.util.TreeSet<Long>>() {}));
 
     @StateId("tableMapState")
     private final StateSpec<
             MapState<String, com.google.cloud.teleport.v2.templates.model.DataGeneratorTable>>
-        tableMapSpec =
+            tableMapSpec =
             StateSpecs.map(
-                org.apache.beam.sdk.coders.StringUtf8Coder.of(),
-                org.apache.beam.sdk.coders.SerializableCoder.of(
-                    com.google.cloud.teleport.v2.templates.model.DataGeneratorTable.class));
+                    org.apache.beam.sdk.coders.StringUtf8Coder.of(),
+                    org.apache.beam.sdk.coders.SerializableCoder.of(
+                            com.google.cloud.teleport.v2.templates.model.DataGeneratorTable.class));
 
     public BatchAndWriteFn(
-        DataGeneratorOptions options, PCollectionView<DataGeneratorSchema> schemaView) {
+            DataGeneratorOptions options, PCollectionView<DataGeneratorSchema> schemaView) {
       this.sinkType = options.getSinkType().name();
       this.sinkOptionsPath = options.getSinkOptions();
       this.configuredBatchSize = options.getBatchSize();
@@ -182,10 +181,10 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     public BatchAndWriteFn(
-        String sinkType,
-        String sinkOptionsPath,
-        Integer batchSize,
-        PCollectionView<DataGeneratorSchema> schemaView) {
+            String sinkType,
+            String sinkOptionsPath,
+            Integer batchSize,
+            PCollectionView<DataGeneratorSchema> schemaView) {
       this.sinkType = sinkType;
       this.sinkOptionsPath = sinkOptionsPath;
       this.configuredBatchSize = batchSize;
@@ -197,7 +196,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     @Setup
     public void setup(org.apache.beam.sdk.options.PipelineOptions options) {
       com.google.cloud.teleport.v2.templates.DataGeneratorOptions genOptions =
-          options.as(com.google.cloud.teleport.v2.templates.DataGeneratorOptions.class);
+              options.as(com.google.cloud.teleport.v2.templates.DataGeneratorOptions.class);
       this.insertQps = genOptions.getInsertQps();
       this.updateQps = genOptions.getUpdateQps();
       this.deleteQps = genOptions.getDeleteQps();
@@ -205,37 +204,34 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         String sinkOptionsJson = readSinkOptions(sinkOptionsPath);
         if (Constants.SINK_TYPE_MYSQL.equalsIgnoreCase(sinkType)) {
           this.writer =
-              new com.google.cloud.teleport.v2.templates.writer.MySqlDataWriter(sinkOptionsJson);
+                  new com.google.cloud.teleport.v2.templates.writer.MySqlDataWriter(sinkOptionsJson);
           try {
             ShardFileReader shardFileReader = new ShardFileReader(new SecretManagerAccessorImpl());
             List<Shard> shards = shardFileReader.getOrderedShardDetails(sinkOptionsPath);
             this.logicalShardIds =
-                shards.stream().map(Shard::getLogicalShardId).collect(Collectors.toList());
+                    shards.stream().map(Shard::getLogicalShardId).collect(Collectors.toList());
           } catch (Exception e) {
             throw new RuntimeException("Failed to read shards from " + sinkOptionsPath, e);
           }
         } else {
           this.writer =
-              new com.google.cloud.teleport.v2.templates.writer.SpannerDataWriter(sinkOptionsJson);
+                  new com.google.cloud.teleport.v2.templates.writer.SpannerDataWriter(sinkOptionsJson);
         }
       }
       if (this.faker == null) {
-        // Seed from multiple independent entropy sources (see SeedUtils javadoc). Using only
-        // `new SecureRandom().nextLong()` is unsafe on Dataflow: autoscaled worker VMs are
-        // cloned from the same image and can have correlated /dev/urandom state when @Setup
-        // runs, previously producing identical non-PK Faker values across workers as well.
-        this.faker = new Faker(new java.util.Random(SeedUtils.generate()));
+        java.security.SecureRandom secureRandom = new java.security.SecureRandom();
+        this.faker = new Faker(new java.util.Random(secureRandom.nextLong()));
       }
     }
 
     private String readSinkOptions(String path) {
       try (java.nio.channels.ReadableByteChannel channel =
-          org.apache.beam.sdk.io.FileSystems.open(
-              org.apache.beam.sdk.io.FileSystems.matchNewResource(path, false))) {
+                   org.apache.beam.sdk.io.FileSystems.open(
+                           org.apache.beam.sdk.io.FileSystems.matchNewResource(path, false))) {
         try (java.io.Reader reader =
-            new java.io.InputStreamReader(
-                java.nio.channels.Channels.newInputStream(channel),
-                java.nio.charset.StandardCharsets.UTF_8)) {
+                     new java.io.InputStreamReader(
+                             java.nio.channels.Channels.newInputStream(channel),
+                             java.nio.charset.StandardCharsets.UTF_8)) {
           return com.google.common.io.CharStreams.toString(reader);
         }
       } catch (java.io.IOException e) {
@@ -251,15 +247,15 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
     @ProcessElement
     public void processElement(
-        ProcessContext c,
-        @StateId("activeKeys") MapState<String, Row> activeKeys,
-        @StateId("eventQueue") MapState<Long, List<LifecycleEvent>> eventQueueState,
-        @StateId("activeTimestamps")
+            ProcessContext c,
+            @StateId("activeKeys") MapState<String, Row> activeKeys,
+            @StateId("eventQueue") MapState<Long, List<LifecycleEvent>> eventQueueState,
+            @StateId("activeTimestamps")
             org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
-        @StateId("tableMapState")
+            @StateId("tableMapState")
             MapState<String, com.google.cloud.teleport.v2.templates.model.DataGeneratorTable>
-                tableMapState,
-        @TimerId("eventTimer") Timer eventTimer) {
+                    tableMapState,
+            @TimerId("eventTimer") Timer eventTimer) {
       if (schema == null) {
         schema = c.sideInput(schemaView);
       }
@@ -267,7 +263,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       String tableName = key.split("#")[0];
       Row row = c.element().getValue();
       com.google.cloud.teleport.v2.templates.model.DataGeneratorTable table =
-          schema.tables().get(tableName);
+              schema.tables().get(tableName);
 
       if (table == null) {
         Metrics.counter(BatchAndWriteFn.class, "tableNotFound_" + tableName).inc();
@@ -279,24 +275,51 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       String pkValue = getPkValue(row, table);
       if (pkValue != null) {
         String stateKey = tableName + ":" + pkValue;
+        LOG.info("State key" + stateKey);
+
+        // Diagnostic fingerprint for distinguishing replay vs. independent-emission collision.
+        // - "shardId" is randomly chosen per emission in GeneratePrimaryKeyFn (random.nextInt),
+        //   so two INDEPENDENT emissions of the same PK will almost always have DIFFERENT shardIds,
+        //   while the SAME emitted element being replayed will have the BYTE-IDENTICAL shardId.
+        // - "rowContent" is the full Row dump; same value across log lines = same emitted element.
+        // - "identityHash" is the JVM-local object identity; only meaningful within one worker JVM
+        //   (across workers it will always differ even for "same" element), but useful to confirm
+        //   whether the same Java object is being reprocessed within a single JVM.
+        // To diagnose: grep these lines for a known-bad pk; compare shardId + rowContent across
+        // duplicate hits.
+        //   - identical shardId+rowContent across duplicates  => same element replayed (REPLAY)
+        //   - differing shardId across duplicates             => independent upstream emissions
+        String diagShardId =
+            row.getSchema().hasField(Constants.SHARD_ID_COLUMN_NAME)
+                ? row.getString(Constants.SHARD_ID_COLUMN_NAME)
+                : "<no-shard-id-field>";
+        LOG.info(
+            "PK fingerprint: table={} pk={} shardId={} identityHash={} schemaFields={} rowContent={}",
+            tableName,
+            pkValue,
+            diagShardId,
+            System.identityHashCode(row),
+            row.getSchema().getFieldCount(),
+            row.toString());
+
         org.apache.beam.sdk.state.ReadableState<Row> state = activeKeys.get(stateKey);
         if (state != null && state.read() != null) {
           LOG.info(
-              "Collision/Retry detected for key: {}. Skipping to maintain integrity.", stateKey);
+                  "Collision/Retry detected for key: {}. Skipping to maintain integrity.", stateKey);
           return;
         }
       }
 
       // Process this table and its children (Inserts)
       processTable(
-          table,
-          row,
-          activeKeys,
-          eventQueueState,
-          activeTimestamps,
-          eventTimer,
-          0L,
-          new HashMap<>());
+              table,
+              row,
+              activeKeys,
+              eventQueueState,
+              activeTimestamps,
+              eventTimer,
+              0L,
+              new HashMap<>());
     }
 
     /**
@@ -304,37 +327,43 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
      * processes children.
      */
     private void processTable(
-        DataGeneratorTable table,
-        Row row,
-        MapState<String, Row> activeKeys,
-        MapState<Long, List<LifecycleEvent>> eventQueueState,
-        org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
-        Timer eventTimer,
-        long forcedDeleteTimestamp,
-        Map<String, Row> ancestorRows) {
+            DataGeneratorTable table,
+            Row row,
+            MapState<String, Row> activeKeys,
+            MapState<Long, List<LifecycleEvent>> eventQueueState,
+            org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
+            Timer eventTimer,
+            long forcedDeleteTimestamp,
+            Map<String, Row> ancestorRows) {
       insertsGenerated.inc();
       String tableName = table.name();
 
       // 0. Ensure Row has all columns (generate missing if needed)
       Row fullRow = completeRow(table, row);
 
+      String pkValue = getPkValue(fullRow, table);
+      if (pkValue != null) {
+        LOG.info("PK value" + pkValue);
+        activeKeys.put(tableName + ":" + pkValue, createReducedRow(fullRow, table));
+      }
+
       // 1. Buffer Row for current record
       String shardId = "";
       if (fullRow.getSchema().hasField(Constants.SHARD_ID_COLUMN_NAME)) {
         shardId = fullRow.getString(Constants.SHARD_ID_COLUMN_NAME);
       } else if (Constants.SINK_TYPE_MYSQL.equalsIgnoreCase(sinkType)
-          && logicalShardIds != null
-          && !logicalShardIds.isEmpty()) {
+              && logicalShardIds != null
+              && !logicalShardIds.isEmpty()) {
         shardId =
-            logicalShardIds.get(
-                java.util.concurrent.ThreadLocalRandom.current().nextInt(logicalShardIds.size()));
+                logicalShardIds.get(
+                        java.util.concurrent.ThreadLocalRandom.current().nextInt(logicalShardIds.size()));
       }
       String bufferKey =
-          tableName
-              + "#"
-              + (shardId.isEmpty() ? "default" : shardId)
-              + "#"
-              + Constants.MUTATION_INSERT;
+              tableName
+                      + "#"
+                      + (shardId.isEmpty() ? "default" : shardId)
+                      + "#"
+                      + Constants.MUTATION_INSERT;
 
       buffers.computeIfAbsent(bufferKey, k -> new BufferValue(table)).rows.add(fullRow);
       if (buffers.get(bufferKey).rows.size() >= batchSize) {
@@ -342,7 +371,6 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       }
 
       // Calculate Lifecycle Events based on QPS ratios
-      String pkValue = getPkValue(fullRow, table);
       long deleteTimestamp = 0;
       int numUpdates = 0;
       long now = System.currentTimeMillis();
@@ -371,7 +399,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         } else {
           // Determine if delete should happen
           boolean hasDelete =
-              java.util.concurrent.ThreadLocalRandom.current().nextDouble() < deleteRatio;
+                  java.util.concurrent.ThreadLocalRandom.current().nextDouble() < deleteRatio;
           if (hasDelete) {
             deleteTimestamp = now + 5000 * numUpdates + 10000;
           }
@@ -387,15 +415,15 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
           DataGeneratorTable childTable = schema.tables().get(childTableName);
           if (childTable != null) {
             generateAndWriteChildren(
-                table,
-                fullRow,
-                childTable,
-                activeKeys,
-                eventQueueState,
-                activeTimestamps,
-                eventTimer,
-                deleteTimestamp,
-                updatedAncestorRows);
+                    table,
+                    fullRow,
+                    childTable,
+                    activeKeys,
+                    eventQueueState,
+                    activeTimestamps,
+                    eventTimer,
+                    deleteTimestamp,
+                    updatedAncestorRows);
           } else {
             // Should not happen if schema DAG is built correctly
             Metrics.counter(BatchAndWriteFn.class, "childTableNotFound_" + childTableName).inc();
@@ -406,26 +434,24 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       // 3. Schedule Lifecycle Events for THIS record LAST
       if (pkValue != null) {
         try {
-          activeKeys.put(tableName + ":" + pkValue, createReducedRow(fullRow, table));
-
           // Schedule updates
           for (int i = 1; i <= numUpdates; i++) {
             scheduleEvent(
-                now + 5000 * i,
-                new LifecycleEvent(pkValue, Constants.MUTATION_UPDATE, tableName),
-                eventQueueState,
-                activeTimestamps,
-                eventTimer);
+                    now + 5000 * i,
+                    new LifecycleEvent(pkValue, Constants.MUTATION_UPDATE, tableName),
+                    eventQueueState,
+                    activeTimestamps,
+                    eventTimer);
           }
 
           // Schedule delete
           if (deleteTimestamp > 0) {
             scheduleEvent(
-                deleteTimestamp,
-                new LifecycleEvent(pkValue, Constants.MUTATION_DELETE, tableName),
-                eventQueueState,
-                activeTimestamps,
-                eventTimer);
+                    deleteTimestamp,
+                    new LifecycleEvent(pkValue, Constants.MUTATION_DELETE, tableName),
+                    eventQueueState,
+                    activeTimestamps,
+                    eventTimer);
           }
         } catch (Exception e) {
           LOG.error("Error scheduling events", e);
@@ -434,15 +460,15 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     private void generateAndWriteChildren(
-        DataGeneratorTable parentTable,
-        Row parentRow,
-        DataGeneratorTable childTable,
-        MapState<String, Row> activeKeys,
-        MapState<Long, List<LifecycleEvent>> eventQueueState,
-        org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
-        Timer eventTimer,
-        long forcedDeleteTimestamp,
-        Map<String, Row> ancestorRows) {
+            DataGeneratorTable parentTable,
+            Row parentRow,
+            DataGeneratorTable childTable,
+            MapState<String, Row> activeKeys,
+            MapState<Long, List<LifecycleEvent>> eventQueueState,
+            org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
+            Timer eventTimer,
+            long forcedDeleteTimestamp,
+            Map<String, Row> ancestorRows) {
       // Calculate number of children to generate based on QPS ratio
       // Avoid division by zero
       double parentQps = Math.max(1, parentTable.insertQps());
@@ -458,22 +484,22 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       for (int i = 0; i < numChildren; i++) {
         Row childRow = generateChildRow(parentTable, parentRow, childTable, ancestorRows);
         processTable(
-            childTable,
-            childRow,
-            activeKeys,
-            eventQueueState,
-            activeTimestamps,
-            eventTimer,
-            forcedDeleteTimestamp,
-            ancestorRows);
+                childTable,
+                childRow,
+                activeKeys,
+                eventQueueState,
+                activeTimestamps,
+                eventTimer,
+                forcedDeleteTimestamp,
+                ancestorRows);
       }
     }
 
     private Row generateChildRow(
-        DataGeneratorTable parentTable,
-        Row parentRow,
-        DataGeneratorTable childTable,
-        Map<String, Row> ancestorRows) {
+            DataGeneratorTable parentTable,
+            Row parentRow,
+            DataGeneratorTable childTable,
+            Map<String, Row> ancestorRows) {
       // 1. Determine values for all columns
       // Foreign Keys must match Parent
       // Other columns generated via Faker
@@ -515,8 +541,8 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       }
 
       if (!fkFound
-          && childTable.interleavedInTable() != null
-          && childTable.interleavedInTable().equals(parentTable.name())) {
+              && childTable.interleavedInTable() != null
+              && childTable.interleavedInTable().equals(parentTable.name())) {
         // For interleaved tables without explicit FK, assume child PK starts with
         // parent PK
         // columns.
@@ -541,7 +567,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
         // Map to Beam Schema Type
         schemaBuilder.addField(
-            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+                Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
         values.add(val);
       }
 
@@ -550,7 +576,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       if (parentRow.getSchema().hasField(Constants.SHARD_ID_COLUMN_NAME)) {
         shardId = parentRow.getString(Constants.SHARD_ID_COLUMN_NAME);
         schemaBuilder.addField(
-            Schema.Field.of(Constants.SHARD_ID_COLUMN_NAME, Schema.FieldType.STRING));
+                Schema.Field.of(Constants.SHARD_ID_COLUMN_NAME, Schema.FieldType.STRING));
       }
 
       if (shardId != null) {
@@ -561,11 +587,11 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     private void scheduleEvent(
-        long timestamp,
-        LifecycleEvent event,
-        MapState<Long, List<LifecycleEvent>> eventQueueState,
-        org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
-        Timer eventTimer) {
+            long timestamp,
+            LifecycleEvent event,
+            MapState<Long, List<LifecycleEvent>> eventQueueState,
+            org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
+            Timer eventTimer) {
 
       long snappedTimestamp = (timestamp / 1000) * 1000;
 
@@ -627,14 +653,14 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
     @OnTimer("eventTimer")
     public void onTimer(
-        @StateId("activeKeys") MapState<String, Row> activeKeys,
-        @StateId("eventQueue") MapState<Long, List<LifecycleEvent>> eventQueueState,
-        @StateId("activeTimestamps")
+            @StateId("activeKeys") MapState<String, Row> activeKeys,
+            @StateId("eventQueue") MapState<Long, List<LifecycleEvent>> eventQueueState,
+            @StateId("activeTimestamps")
             org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
-        @StateId("tableMapState")
+            @StateId("tableMapState")
             MapState<String, com.google.cloud.teleport.v2.templates.model.DataGeneratorTable>
-                tableMapState,
-        @TimerId("eventTimer") Timer eventTimer) {
+                    tableMapState,
+            @TimerId("eventTimer") Timer eventTimer) {
 
       java.util.TreeSet<Long> timestamps = activeTimestamps.read();
       if (timestamps == null || timestamps.isEmpty()) {
@@ -668,12 +694,12 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     private void processEvent(
-        LifecycleEvent event,
-        MapState<String, Row> activeKeys,
-        MapState<Long, List<LifecycleEvent>> eventQueueState,
-        Timer eventTimer,
-        MapState<String, com.google.cloud.teleport.v2.templates.model.DataGeneratorTable>
-            tableMapState) {
+            LifecycleEvent event,
+            MapState<String, Row> activeKeys,
+            MapState<Long, List<LifecycleEvent>> eventQueueState,
+            Timer eventTimer,
+            MapState<String, com.google.cloud.teleport.v2.templates.model.DataGeneratorTable>
+                    tableMapState) {
       String key = event.tableName + ":" + event.id;
       try {
         if (activeKeys.get(key).read() == null) {
@@ -724,21 +750,21 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       Set<String> uniqueColumns = new HashSet<>();
       if (table.uniqueKeys() != null) {
         for (com.google.cloud.teleport.v2.templates.model.DataGeneratorUniqueKey uk :
-            table.uniqueKeys()) {
+                table.uniqueKeys()) {
           uniqueColumns.addAll(uk.keyColumns());
         }
       }
 
       for (DataGeneratorColumn col : table.columns()) {
         schemaBuilder.addField(
-            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+                Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
         if (col.isPrimaryKey()) {
           values.add(parsePkValue(id, col));
         } else if (fkColumns.contains(col.name()) || uniqueColumns.contains(col.name())) {
           Object val =
-              originalRow != null && originalRow.getSchema().hasField(col.name())
-                  ? originalRow.getValue(col.name())
-                  : generateValue(col);
+                  originalRow != null && originalRow.getSchema().hasField(col.name())
+                          ? originalRow.getValue(col.name())
+                          : generateValue(col);
           values.add(val);
         } else {
           values.add(generateValue(col));
@@ -753,14 +779,14 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
       for (com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn col : table.columns()) {
         org.apache.beam.sdk.schemas.Schema.FieldType fieldType =
-            DataGeneratorUtils.mapToBeamFieldType(col.logicalType());
+                DataGeneratorUtils.mapToBeamFieldType(col.logicalType());
         if (col.isPrimaryKey()) {
           schemaBuilder.addField(
-              org.apache.beam.sdk.schemas.Schema.Field.of(col.name(), fieldType));
+                  org.apache.beam.sdk.schemas.Schema.Field.of(col.name(), fieldType));
           values.add(parsePkValue(id, col));
         } else {
           schemaBuilder.addField(
-              org.apache.beam.sdk.schemas.Schema.Field.nullable(col.name(), fieldType));
+                  org.apache.beam.sdk.schemas.Schema.Field.nullable(col.name(), fieldType));
           values.add(null);
         }
       }
@@ -769,7 +795,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
     private Object parsePkValue(String id, DataGeneratorColumn col) {
       if ("INT".equalsIgnoreCase(col.originalType())
-          || "BIGINT".equalsIgnoreCase(col.originalType())) {
+              || "BIGINT".equalsIgnoreCase(col.originalType())) {
         return Long.parseLong(id);
       }
       return id;
@@ -789,18 +815,18 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       Set<String> uniqueColumns = new HashSet<>();
       if (table.uniqueKeys() != null) {
         for (com.google.cloud.teleport.v2.templates.model.DataGeneratorUniqueKey uk :
-            table.uniqueKeys()) {
+                table.uniqueKeys()) {
           uniqueColumns.addAll(uk.keyColumns());
         }
       }
 
       for (DataGeneratorColumn col : table.columns()) {
         if (col.isPrimaryKey()
-            || fkColumns.contains(col.name())
-            || uniqueColumns.contains(col.name())) {
+                || fkColumns.contains(col.name())
+                || uniqueColumns.contains(col.name())) {
           schemaBuilder.addField(
-              Schema.Field.of(
-                  col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+                  Schema.Field.of(
+                          col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
           values.add(fullRow.getValue(col.name()));
         }
       }
@@ -808,22 +834,22 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     private void bufferMutation(
-        String tableName,
-        Row row,
-        String operation,
-        com.google.cloud.teleport.v2.templates.model.DataGeneratorTable table) {
+            String tableName,
+            Row row,
+            String operation,
+            com.google.cloud.teleport.v2.templates.model.DataGeneratorTable table) {
       String shardId = "";
       if (row.getSchema().hasField(Constants.SHARD_ID_COLUMN_NAME)) {
         shardId = row.getString(Constants.SHARD_ID_COLUMN_NAME);
       } else if (Constants.SINK_TYPE_MYSQL.equalsIgnoreCase(sinkType)
-          && logicalShardIds != null
-          && !logicalShardIds.isEmpty()) {
+              && logicalShardIds != null
+              && !logicalShardIds.isEmpty()) {
         shardId =
-            logicalShardIds.get(
-                java.util.concurrent.ThreadLocalRandom.current().nextInt(logicalShardIds.size()));
+                logicalShardIds.get(
+                        java.util.concurrent.ThreadLocalRandom.current().nextInt(logicalShardIds.size()));
       }
       String bufferKey =
-          tableName + "#" + (shardId.isEmpty() ? "default" : shardId) + "#" + operation;
+              tableName + "#" + (shardId.isEmpty() ? "default" : shardId) + "#" + operation;
 
       buffers.computeIfAbsent(bufferKey, k -> new BufferValue(table)).rows.add(row);
       if (buffers.get(bufferKey).rows.size() >= batchSize) {
@@ -868,7 +894,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       BufferValue bv = buffers.get(bufferKey);
       List<Row> batch = bv != null ? bv.rows : null;
       com.google.cloud.teleport.v2.templates.model.DataGeneratorTable table =
-          bv != null ? bv.table : null;
+              bv != null ? bv.table : null;
 
       if (batch != null && !batch.isEmpty()) {
         writer.write(batch, table, shardId, operation);
@@ -907,7 +933,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
           val = generateValue(col);
         }
         schemaBuilder.addField(
-            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+                Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
         values.add(val);
       }
 
@@ -916,7 +942,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       if (partialRow.getSchema().hasField(Constants.SHARD_ID_COLUMN_NAME)) {
         shardId = partialRow.getString(Constants.SHARD_ID_COLUMN_NAME);
         schemaBuilder.addField(
-            Schema.Field.of(Constants.SHARD_ID_COLUMN_NAME, Schema.FieldType.STRING));
+                Schema.Field.of(Constants.SHARD_ID_COLUMN_NAME, Schema.FieldType.STRING));
       }
 
       if (shardId != null) {
