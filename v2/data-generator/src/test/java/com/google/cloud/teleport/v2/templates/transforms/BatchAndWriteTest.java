@@ -966,7 +966,9 @@ public class BatchAndWriteTest implements Serializable {
     BatchAndWrite.BatchAndWriteFn fn = new BatchAndWrite.BatchAndWriteFn("MYSQL", null, 100, null);
     fn.faker = new com.github.javafaker.Faker();
 
-    org.apache.beam.sdk.values.Row updateRow = fn.generateUpdateRow("100", table, originalRow);
+    java.util.LinkedHashMap<String, Object> pkValues = new java.util.LinkedHashMap<>();
+    pkValues.put("id", "100");
+    org.apache.beam.sdk.values.Row updateRow = fn.generateUpdateRow(pkValues, table, originalRow);
 
     org.junit.Assert.assertEquals("100", updateRow.getString("id"));
     org.junit.Assert.assertEquals("parent_1", updateRow.getString("parent_id"));

@@ -49,11 +49,21 @@ public abstract class DataGeneratorTable implements Serializable {
   /** The target Insert QPS for this table. */
   public abstract int insertQps();
 
-  /** The target Update QPS for this table. */
-  public abstract int updateQps();
+  /**
+   * The target Update QPS for this table, or {@code null} to inherit the pipeline-global update
+   * QPS. An explicit {@code 0} means "never generate updates for this table" and must NOT be
+   * treated as "unset".
+   */
+  @Nullable
+  public abstract Integer updateQps();
 
-  /** The target Delete QPS for this table. */
-  public abstract int deleteQps();
+  /**
+   * The target Delete QPS for this table, or {@code null} to inherit the pipeline-global delete
+   * QPS. An explicit {@code 0} means "never generate deletes for this table" and must NOT be
+   * treated as "unset".
+   */
+  @Nullable
+  public abstract Integer deleteQps();
 
   /** Whether this table is a root table. */
   public abstract boolean isRoot();
@@ -61,12 +71,20 @@ public abstract class DataGeneratorTable implements Serializable {
   /** The list of child tables. */
   public abstract ImmutableList<String> childTables();
 
+  /**
+   * Depth of this table in the parent→child DAG produced by {@code SchemaUtils.setSchemaDAG}. A
+   * root has depth {@code 0}; direct children have depth {@code 1}; grandchildren {@code 2}; etc.
+   * When a table has multiple ancestors, its depth is the longest chain length from any root.
+   */
+  public abstract int depth();
+
   public static Builder builder() {
     return new AutoValue_DataGeneratorTable.Builder()
         .insertQps(1)
-        .updateQps(0)
-        .deleteQps(0)
+        .updateQps(null)
+        .deleteQps(null)
         .isRoot(true)
+        .depth(0)
         .childTables(ImmutableList.of());
   }
 
@@ -88,13 +106,15 @@ public abstract class DataGeneratorTable implements Serializable {
 
     public abstract Builder insertQps(int insertQps);
 
-    public abstract Builder updateQps(int updateQps);
+    public abstract Builder updateQps(@Nullable Integer updateQps);
 
-    public abstract Builder deleteQps(int deleteQps);
+    public abstract Builder deleteQps(@Nullable Integer deleteQps);
 
     public abstract Builder isRoot(boolean isRoot);
 
     public abstract Builder childTables(ImmutableList<String> childTables);
+
+    public abstract Builder depth(int depth);
 
     public abstract DataGeneratorTable build();
   }

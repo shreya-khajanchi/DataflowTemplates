@@ -96,13 +96,43 @@ public class SchemaUtils {
       hasSequenceParent.add(childName);
     }
 
-    // 2. Update Tables with Sequence Children and isRoot
+    // 2. Compute depth via BFS from root tables (longest-chain semantics).
+    Map<String, Integer> depthMap = new HashMap<>();
+    for (String tableName : tableMap.keySet()) {
+      if (!hasSequenceParent.contains(tableName)) {
+        depthMap.put(tableName, 0); // root
+      }
+    }
+    boolean changed = true;
+    // Iterate until stable. The DAG is finite (SchemaUtils assumes acyclic input) so
+    // convergence is guaranteed within at most |V| passes.
+    int maxIter = tableMap.size() + 1;
+    while (changed && maxIter-- > 0) {
+      changed = false;
+      for (Map.Entry<String, List<String>> e : parentToSequenceChild.entrySet()) {
+        Integer parentDepth = depthMap.get(e.getKey());
+        if (parentDepth == null) {
+          continue;
+        }
+        for (String child : e.getValue()) {
+          int candidate = parentDepth + 1;
+          Integer existing = depthMap.get(child);
+          if (existing == null || candidate > existing) {
+            depthMap.put(child, candidate);
+            changed = true;
+          }
+        }
+      }
+    }
+
+    // 3. Update Tables with Sequence Children, isRoot, and depth.
     ImmutableMap.Builder<String, DataGeneratorTable> newTablesBuilder = ImmutableMap.builder();
     for (DataGeneratorTable table : tableMap.values()) {
       String tableName = table.name();
       List<String> sequenceChildren =
           parentToSequenceChild.getOrDefault(tableName, ImmutableList.of());
       boolean isRoot = !hasSequenceParent.contains(tableName);
+      int depth = depthMap.getOrDefault(tableName, 0);
 
       newTablesBuilder.put(
           tableName,
@@ -111,6 +141,7 @@ public class SchemaUtils {
                   ImmutableList.copyOf(
                       sequenceChildren)) // These are tables to generate AFTER this one
               .isRoot(isRoot)
+              .depth(depth)
               .build());
     }
 
