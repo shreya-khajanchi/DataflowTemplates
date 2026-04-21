@@ -129,14 +129,23 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     private final int batchSize;
     protected transient DataWriter writer;
     protected transient Faker faker;
-    private transient DataGeneratorSchema schema;
+
+    /**
+     * Cached schema side-input. Populated on first {@link #ensureSchemaInitialized} call. {@code
+     * volatile} is defensive — Beam guarantees a DoFn instance is used by at most one thread at a
+     * time, but marking the field makes the single-write / single-read invariant explicit and
+     * immune to JIT re-ordering concerns.
+     */
+    private transient volatile DataGeneratorSchema schema;
+
     private transient List<String> logicalShardIds;
 
     /**
-     * Root-to-leaf topological ordering of tables; populated lazily from {@link #schema}. Used to
-     * flush INSERT buffers parent-first and DELETE buffers child-first (reverse).
+     * Root-to-leaf topological ordering of tables derived from {@link #schema}. Populated
+     * together with {@code schema} so the two fields are always in-sync. Used to flush INSERT
+     * buffers parent-first and DELETE buffers child-first (reverse).
      */
-    private transient List<String> insertTopoOrder;
+    private transient volatile List<String> insertTopoOrder;
 
     static class BufferValue {
       final DataGeneratorTable table;
@@ -189,12 +198,19 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     @TimerId("eventTimer")
     private final TimerSpec eventTimerSpec = TimerSpecs.timer(TimeDomain.PROCESSING_TIME);
 
+    /**
+     * Pending event timestamps (snapped to the second) for this key, in ascending order. We use a
+     * {@code List<Long>} kept sorted on insertion rather than a {@code TreeSet} so we don't rely
+     * on {@code SerializableCoder} preserving {@code TreeSet}'s internal ordering through
+     * checkpoint / restore — the {@code ListCoder + VarLongCoder} pair is explicitly order-
+     * preserving and more compact.
+     */
     @StateId("activeTimestamps")
-    private final StateSpec<org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>>>
+    private final StateSpec<org.apache.beam.sdk.state.ValueState<List<Long>>>
         activeTimestampsSpec =
             StateSpecs.value(
-                org.apache.beam.sdk.coders.SerializableCoder.of(
-                    new org.apache.beam.sdk.values.TypeDescriptor<java.util.TreeSet<Long>>() {}));
+                org.apache.beam.sdk.coders.ListCoder.of(
+                    org.apache.beam.sdk.coders.VarLongCoder.of()));
 
     @StateId("tableMapState")
     private final StateSpec<MapState<String, DataGeneratorTable>> tableMapSpec =
@@ -231,6 +247,11 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       this.insertQps = genOptions.getInsertQps();
       this.updateQps = genOptions.getUpdateQps();
       this.deleteQps = genOptions.getDeleteQps();
+      // Reset lazily-populated caches so each DoFn instance has a clean starting state.
+      // schema / insertTopoOrder are repopulated on the first processElement call via
+      // ensureSchemaInitialized (which is the only place that can access side inputs).
+      this.schema = null;
+      this.insertTopoOrder = null;
       if (this.writer == null) {
         String sinkOptionsJson = readSinkOptions(sinkOptionsPath);
         if (Constants.SINK_TYPE_MYSQL.equalsIgnoreCase(sinkType)) {
@@ -281,13 +302,10 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         @StateId("activeKeys") MapState<String, Row> activeKeys,
         @StateId("eventQueue") MapState<Long, List<LifecycleEvent>> eventQueueState,
         @StateId("activeTimestamps")
-            org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
+            org.apache.beam.sdk.state.ValueState<List<Long>> activeTimestamps,
         @StateId("tableMapState") MapState<String, DataGeneratorTable> tableMapState,
         @TimerId("eventTimer") Timer eventTimer) {
-      if (schema == null) {
-        schema = c.sideInput(schemaView);
-        insertTopoOrder = buildInsertTopoOrder(schema);
-      }
+      ensureSchemaInitialized(c);
       String key = c.element().getKey();
       String tableName = key.split("#")[0];
       Row row = c.element().getValue();
@@ -345,7 +363,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         Row row,
         MapState<String, Row> activeKeys,
         MapState<Long, List<LifecycleEvent>> eventQueueState,
-        org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
+        org.apache.beam.sdk.state.ValueState<List<Long>> activeTimestamps,
         MapState<String, DataGeneratorTable> tableMapState,
         Timer eventTimer,
         long forcedDeleteTimestamp,
@@ -477,7 +495,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         DataGeneratorTable childTable,
         MapState<String, Row> activeKeys,
         MapState<Long, List<LifecycleEvent>> eventQueueState,
-        org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
+        org.apache.beam.sdk.state.ValueState<List<Long>> activeTimestamps,
         MapState<String, DataGeneratorTable> tableMapState,
         Timer eventTimer,
         long forcedDeleteTimestamp,
@@ -495,7 +513,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
       for (int i = 0; i < numChildren; i++) {
         Row childRow = generateChildRow(parentTable, parentRow, childTable, ancestorRows,
-            activeKeys, stickyShardId);
+            stickyShardId);
         if (childRow == null) {
           // FK could not be resolved; skip this child emission to maintain integrity.
           unresolvableFkChildrenDropped.inc();
@@ -517,74 +535,45 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     /**
-     * Generates a child row, populating FK columns from ancestor rows (or from the current parent
-     * row if the ancestor is the direct parent). Returns {@code null} when any FK cannot be
-     * resolved — the caller is expected to skip such rows rather than emit a row with random FK
-     * values that would violate the constraint at the sink.
+     * Generates a child row, populating FK columns from the ancestor chain (the tick cascade).
      *
-     * <p>When the child has multiple FKs pointing to the SAME parent table (e.g. {@code
-     * manager_id} and {@code assistant_id} both referencing {@code Employee}), secondary FKs are
-     * populated from a DIFFERENT previously-active row of that table (pulled from {@code
-     * activeKeys}) so the two columns don't end up with identical values.
+     * <p>In the cascading tick model, every FK parent of a child is placed in the child's
+     * ancestor chain by {@link com.google.cloud.teleport.v2.templates.utils.SchemaUtils#setSchemaDAG}
+     * — so when we reach this method, {@code ancestorRows} is guaranteed to contain exactly one
+     * row for each referenced parent table. A missing ancestor indicates a schema or DAG bug and
+     * is treated as an unresolvable FK (log + skip).
+     *
+     * <p>The generator does not currently support schemas where a child has multiple FKs pointing
+     * to the same parent table; such schemas are rejected at load time by {@link
+     * com.google.cloud.teleport.v2.templates.utils.SchemaUtils#validateNoDuplicateFkTargets}.
      */
     private Row generateChildRow(
         DataGeneratorTable parentTable,
         Row parentRow,
         DataGeneratorTable childTable,
         Map<String, Row> ancestorRows,
-        MapState<String, Row> activeKeys,
         String stickyShardId) {
       Map<String, Object> columnValues = new HashMap<>();
-
-      // Track how many FKs per referenced-table we've resolved; used to pick distinct rows when
-      // the same parent table is referenced more than once.
-      Map<String, Integer> fkOrdinalByTable = new HashMap<>();
 
       boolean resolvedAllFks = true;
 
       if (childTable.foreignKeys() != null && !childTable.foreignKeys().isEmpty()) {
         for (DataGeneratorForeignKey fk : childTable.foreignKeys()) {
           String targetTable = fk.referencedTable();
-          int ordinal = fkOrdinalByTable.getOrDefault(targetTable, 0);
-          fkOrdinalByTable.put(targetTable, ordinal + 1);
-
-          Row source;
-          if (ordinal == 0 && ancestorRows.containsKey(targetTable)) {
-            // First FK to this parent: use the row generated in the current ancestor chain.
-            source = ancestorRows.get(targetTable);
-          } else if (ancestorRows.containsKey(targetTable)) {
-            // Subsequent FK to the SAME parent: pick a different row from active keys.
-            source = pickDifferentActiveRow(activeKeys, targetTable, ancestorRows.get(targetTable));
-            if (source == null) {
-              // No alternative row available yet — fall back to the same ancestor row.
-              source = ancestorRows.get(targetTable);
-            }
-          } else {
-            // Not in the current ancestor chain: try to find any active row for that table.
-            source = pickAnyActiveRow(activeKeys, targetTable);
-          }
-
+          Row source = ancestorRows.get(targetTable);
           if (source == null) {
-            // Last-ditch: try the immediate parent row iff the referenced columns exist on it.
-            boolean allPresent = true;
-            for (String parentCol : fk.referencedColumns()) {
-              if (!parentRow.getSchema().hasField(parentCol)) {
-                allPresent = false;
-                break;
-              }
-            }
-            if (allPresent) {
-              source = parentRow;
-            } else {
-              // Cannot resolve this FK — bail out so the caller can skip this child.
-              LOG.warn(
-                  "Cannot resolve FK {} from {} -> {}: no ancestor or active row available",
-                  fk.name(),
-                  childTable.name(),
-                  targetTable);
-              resolvedAllFks = false;
-              break;
-            }
+            // In a well-formed schema every FK target is in the ancestor chain. A miss here means
+            // either (a) the referenced table is not defined in the schema, or (b) DAG
+            // construction did not place it upstream of this child. Both are bugs; fail loud on
+            // this row rather than emit random FK values that would violate the constraint.
+            LOG.warn(
+                "Cannot resolve FK {} from {} -> {}: target table is not in the ancestor chain."
+                    + " Check that the referenced table exists in the schema.",
+                fk.name(),
+                childTable.name(),
+                targetTable);
+            resolvedAllFks = false;
+            break;
           }
 
           for (int i = 0; i < fk.keyColumns().size(); i++) {
@@ -674,59 +663,11 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       return null;
     }
 
-    /**
-     * Returns any previously-activated row of {@code tableName} whose PK differs from {@code
-     * avoid}, or {@code null} if none exists. Comparison is by derived state key (table + PK)
-     * rather than object identity because the row stored in state is the reduced form.
-     */
-    private Row pickDifferentActiveRow(
-        MapState<String, Row> activeKeys, String tableName, Row avoid) {
-      String prefix = tableName + ":";
-      String avoidKey = null;
-      if (avoid != null && schema != null && schema.tables().containsKey(tableName)) {
-        LinkedHashMap<String, Object> avoidPk = pkValuesOf(avoid, schema.tables().get(tableName));
-        if (!avoidPk.isEmpty()) {
-          avoidKey = stateKeyOf(tableName, avoidPk);
-        }
-      }
-      Iterable<Map.Entry<String, Row>> entries = activeKeys.entries().read();
-      if (entries == null) {
-        return null;
-      }
-      for (Map.Entry<String, Row> e : entries) {
-        if (e.getKey() == null || !e.getKey().startsWith(prefix)) {
-          continue;
-        }
-        if (avoidKey != null && avoidKey.equals(e.getKey())) {
-          continue;
-        }
-        Row candidate = e.getValue();
-        if (candidate != null) {
-          return candidate;
-        }
-      }
-      return null;
-    }
-
-    private Row pickAnyActiveRow(MapState<String, Row> activeKeys, String tableName) {
-      String prefix = tableName + ":";
-      Iterable<Map.Entry<String, Row>> entries = activeKeys.entries().read();
-      if (entries == null) {
-        return null;
-      }
-      for (Map.Entry<String, Row> e : entries) {
-        if (e.getKey() != null && e.getKey().startsWith(prefix) && e.getValue() != null) {
-          return e.getValue();
-        }
-      }
-      return null;
-    }
-
     private void scheduleEvent(
         long timestamp,
         LifecycleEvent event,
         MapState<Long, List<LifecycleEvent>> eventQueueState,
-        org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
+        org.apache.beam.sdk.state.ValueState<List<Long>> activeTimestamps,
         Timer eventTimer) {
 
       long snappedTimestamp = (timestamp / 1000) * 1000;
@@ -738,14 +679,19 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       events.add(event);
       eventQueueState.put(snappedTimestamp, events);
 
-      java.util.TreeSet<Long> timestamps = activeTimestamps.read();
+      List<Long> timestamps = activeTimestamps.read();
       if (timestamps == null) {
-        timestamps = new java.util.TreeSet<>();
+        timestamps = new ArrayList<>();
       }
-      timestamps.add(snappedTimestamp);
-      activeTimestamps.write(timestamps);
+      // Keep the list sorted ascending and duplicate-free so timestamps.get(0) is always the
+      // earliest pending event and reads are O(log n) via binarySearch.
+      int idx = Collections.binarySearch(timestamps, snappedTimestamp);
+      if (idx < 0) {
+        timestamps.add(-(idx + 1), snappedTimestamp);
+        activeTimestamps.write(timestamps);
+      }
 
-      eventTimer.set(org.joda.time.Instant.ofEpochMilli(timestamps.first()));
+      eventTimer.set(org.joda.time.Instant.ofEpochMilli(timestamps.get(0)));
     }
 
     /**
@@ -772,9 +718,44 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
           sb.append("#");
         }
         first = false;
-        sb.append(e.getValue() == null ? "null" : e.getValue().toString());
+        sb.append(canonicalizeValue(e.getValue()));
       }
       return sb.toString();
+    }
+
+    /**
+     * Stable string form of a value for hashing / state-keying. {@code Object.toString()} is not
+     * deterministic for {@code byte[]} or {@code ByteBuffer} (it returns the JVM-assigned object
+     * id like {@code "[B@6a5fc7f7"}), which would make {@link #stableHash} and {@link
+     * #stateKeyOf} produce different keys for the same logical PK across workers or restarts.
+     * Hex-encode byte arrays so the canonical form is identical everywhere.
+     */
+    private static String canonicalizeValue(Object v) {
+      if (v == null) {
+        return "null";
+      }
+      if (v instanceof byte[]) {
+        return "0x" + bytesToHex((byte[]) v);
+      }
+      if (v instanceof java.nio.ByteBuffer) {
+        java.nio.ByteBuffer bb = ((java.nio.ByteBuffer) v).duplicate();
+        byte[] bytes = new byte[bb.remaining()];
+        bb.get(bytes);
+        return "0x" + bytesToHex(bytes);
+      }
+      return v.toString();
+    }
+
+    private static final char[] HEX_CHARS = "0123456789abcdef".toCharArray();
+
+    private static String bytesToHex(byte[] bytes) {
+      char[] out = new char[bytes.length * 2];
+      for (int i = 0; i < bytes.length; i++) {
+        int b = bytes[i] & 0xff;
+        out[i * 2] = HEX_CHARS[b >>> 4];
+        out[i * 2 + 1] = HEX_CHARS[b & 0x0f];
+      }
+      return new String(out);
     }
 
     private Object getFieldFromRow(Row row, String fieldName) {
@@ -790,17 +771,18 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         @StateId("activeKeys") MapState<String, Row> activeKeys,
         @StateId("eventQueue") MapState<Long, List<LifecycleEvent>> eventQueueState,
         @StateId("activeTimestamps")
-            org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> activeTimestamps,
+            org.apache.beam.sdk.state.ValueState<List<Long>> activeTimestamps,
         @StateId("tableMapState") MapState<String, DataGeneratorTable> tableMapState,
         @TimerId("eventTimer") Timer eventTimer) {
 
-      java.util.TreeSet<Long> timestamps = activeTimestamps.read();
+      List<Long> timestamps = activeTimestamps.read();
       if (timestamps == null || timestamps.isEmpty()) {
         return;
       }
 
       long now = System.currentTimeMillis();
-      java.util.List<Long> toRemove = new java.util.ArrayList<>();
+      // The list is maintained in ascending order; once we hit a future timestamp we can stop.
+      int firstFutureIdx = 0;
 
       for (Long ts : timestamps) {
         if (ts <= now) {
@@ -815,17 +797,18 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
             }
             eventQueueState.remove(ts);
           }
-          toRemove.add(ts);
+          firstFutureIdx++;
         } else {
           break;
         }
       }
 
-      timestamps.removeAll(toRemove);
+      // Drop all processed (past-or-now) timestamps from the head of the sorted list.
+      timestamps = new ArrayList<>(timestamps.subList(firstFutureIdx, timestamps.size()));
       activeTimestamps.write(timestamps);
 
       if (!timestamps.isEmpty()) {
-        eventTimer.set(org.joda.time.Instant.ofEpochMilli(timestamps.first()));
+        eventTimer.set(org.joda.time.Instant.ofEpochMilli(timestamps.get(0)));
       }
     }
 
@@ -1320,7 +1303,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         for (Map.Entry<String, Object> e : pkValues.entrySet()) {
           h = fnv(h, e.getKey());
           h = fnv(h, "=");
-          h = fnv(h, e.getValue() == null ? "null" : e.getValue().toString());
+          h = fnv(h, canonicalizeValue(e.getValue()));
           h = fnv(h, ";");
         }
       }
@@ -1333,6 +1316,30 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         h *= 0x100000001b3L;
       }
       return h;
+    }
+
+    /**
+     * One-shot materialization of the schema side-input and its derived topological ordering.
+     *
+     * <p>Side inputs are only accessible from {@code @ProcessElement} (not {@code @StartBundle} or
+     * {@code @Setup}), so this must run on the first element. Once populated, both fields stay
+     * consistent for the rest of the DoFn instance's lifetime — the underlying schema is a
+     * singleton {@link PCollectionView} that doesn't change during pipeline execution. Subsequent
+     * calls are no-ops.
+     *
+     * <p>Thread-safety note: Beam guarantees a DoFn instance is used by at most one thread at a
+     * time, so no locking is required. The fields are {@code volatile} for defensive clarity.
+     */
+    private void ensureSchemaInitialized(ProcessContext c) {
+      if (schema != null) {
+        return;
+      }
+      DataGeneratorSchema loaded = c.sideInput(schemaView);
+      List<String> topo = buildInsertTopoOrder(loaded);
+      // Publish insertTopoOrder first so any reader that sees a non-null schema is guaranteed to
+      // also see a populated topo order.
+      this.insertTopoOrder = topo;
+      this.schema = loaded;
     }
 
     /**

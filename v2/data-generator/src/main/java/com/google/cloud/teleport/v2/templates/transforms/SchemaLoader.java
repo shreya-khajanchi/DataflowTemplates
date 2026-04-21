@@ -100,6 +100,7 @@ public class SchemaLoader extends PTransform<PBegin, PCollectionView<DataGenerat
           schema = applyOverrides(schema, schemaConfigJson);
         }
 
+        SchemaUtils.validateNoDuplicateFkTargets(schema);
         schema = SchemaUtils.setSchemaDAG(schema);
         LOG.info("Fetched Schema: {}", schema);
 

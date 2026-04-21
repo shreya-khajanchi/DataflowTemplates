@@ -331,7 +331,7 @@ public class BatchAndWriteTest implements Serializable {
         mockEventQueueState = new FakeMapState<>();
     org.apache.beam.sdk.state.Timer mockEventTimer = mock(org.apache.beam.sdk.state.Timer.class);
 
-    org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> mockActiveTimestamps =
+    org.apache.beam.sdk.state.ValueState<List<Long>> mockActiveTimestamps =
         mock(org.apache.beam.sdk.state.ValueState.class);
     fn.setup(options);
     fn.startBundle();
@@ -424,7 +424,7 @@ public class BatchAndWriteTest implements Serializable {
         .thenReturn(mockReadableState);
     when(mockReadableState.read()).thenReturn(null);
 
-    org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> mockActiveTimestamps =
+    org.apache.beam.sdk.state.ValueState<List<Long>> mockActiveTimestamps =
         mock(org.apache.beam.sdk.state.ValueState.class);
     fn.setup(options);
     fn.startBundle();
@@ -546,7 +546,7 @@ public class BatchAndWriteTest implements Serializable {
         new FakeMapState<>();
     org.apache.beam.sdk.state.Timer mockEventTimer = mock(org.apache.beam.sdk.state.Timer.class);
 
-    org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> mockActiveTimestamps =
+    org.apache.beam.sdk.state.ValueState<List<Long>> mockActiveTimestamps =
         mock(org.apache.beam.sdk.state.ValueState.class);
     fn.setup(options);
     fn.startBundle();
@@ -857,7 +857,7 @@ public class BatchAndWriteTest implements Serializable {
         .thenReturn(mockReadableState);
     when(mockReadableState.read()).thenReturn(null);
 
-    org.apache.beam.sdk.state.ValueState<java.util.TreeSet<Long>> mockActiveTimestamps =
+    org.apache.beam.sdk.state.ValueState<List<Long>> mockActiveTimestamps =
         mock(org.apache.beam.sdk.state.ValueState.class);
     fn.setup(options);
     fn.startBundle();

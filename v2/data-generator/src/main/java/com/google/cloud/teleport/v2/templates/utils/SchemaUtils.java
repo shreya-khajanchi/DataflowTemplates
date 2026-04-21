@@ -31,6 +31,35 @@ import java.util.Set;
 public class SchemaUtils {
 
   /**
+   * Rejects schemas in which any child table has more than one foreign key pointing at the same
+   * parent table (e.g. {@code Employee.manager_id} and {@code Employee.assistant_id} both
+   * referencing {@code Employee}).
+   *
+   * <p>The cascading tick-generation model can only supply one row per parent table per tick, so
+   * multi-FK-to-same-parent would produce either duplicate FK values or silently skipped FKs. We
+   * fail fast here so the user gets a clear error instead of bad data downstream.
+   */
+  public static void validateNoDuplicateFkTargets(DataGeneratorSchema schema) {
+    for (DataGeneratorTable table : schema.tables().values()) {
+      if (table.foreignKeys() == null) {
+        continue;
+      }
+      Set<String> seenTargets = new HashSet<>();
+      for (DataGeneratorForeignKey fk : table.foreignKeys()) {
+        String target = fk.referencedTable();
+        if (!seenTargets.add(target)) {
+          throw new IllegalArgumentException(
+              String.format(
+                  "Table '%s' has multiple foreign keys referencing '%s'. The data generator does"
+                      + " not currently support multiple FKs from one child to the same parent"
+                      + " table; please split the schema or drop the extra FK.",
+                  table.name(), target));
+        }
+      }
+    }
+  }
+
+  /**
    * Constructs a Directed Acyclic Graph (DAG) of tables in the schema. Identifies parent-child
    * relationships based on Foreign Keys and Interleaving. Handles multiple parents by selecting the
    * one with the *least* QPS. Populates the `children` list for each table and sets `isRoot`
