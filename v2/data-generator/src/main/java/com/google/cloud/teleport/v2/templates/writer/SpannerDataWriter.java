@@ -231,7 +231,6 @@ public class SpannerDataWriter implements DataWriter {
         java.util.List<?> list = (java.util.List<?>) value;
         switch (elementType) {
           case STRING:
-          case JSON:
           case UUID:
           case ENUM:
             builder
@@ -239,7 +238,16 @@ public class SpannerDataWriter implements DataWriter {
                 .to(
                     Value.stringArray(
                         list.stream()
-                            .map(Object::toString)
+                            .map(v -> (String) v)
+                            .collect(java.util.stream.Collectors.toList())));
+            break;
+          case JSON:
+            builder
+                .set(columnName)
+                .to(
+                    Value.jsonArray(
+                        list.stream()
+                            .map(v -> (String) v)
                             .collect(java.util.stream.Collectors.toList())));
             break;
           case INT64:
@@ -269,13 +277,59 @@ public class SpannerDataWriter implements DataWriter {
                             .map(v -> (Boolean) v)
                             .collect(java.util.stream.Collectors.toList())));
             break;
+          case NUMERIC:
+            builder
+                .set(columnName)
+                .to(
+                    Value.numericArray(
+                        list.stream()
+                            .map(v -> (BigDecimal) v)
+                            .collect(java.util.stream.Collectors.toList())));
+            break;
+          case BYTES:
+            builder
+                .set(columnName)
+                .to(
+                    Value.bytesArray(
+                        list.stream()
+                            .map(v -> ByteArray.copyFrom((byte[]) v))
+                            .collect(java.util.stream.Collectors.toList())));
+            break;
+          case TIMESTAMP:
+            builder
+                .set(columnName)
+                .to(
+                    Value.timestampArray(
+                        list.stream()
+                            .map(
+                                v ->
+                                    com.google.cloud.Timestamp.ofTimeMicroseconds(
+                                        ((Instant) v).getMillis() * 1000))
+                            .collect(java.util.stream.Collectors.toList())));
+            break;
+          case DATE:
+            builder
+                .set(columnName)
+                .to(
+                    Value.dateArray(
+                        list.stream()
+                            .map(
+                                v ->
+                                    com.google.cloud.Date.fromJavaUtilDate(
+                                        new java.util.Date(((Instant) v).getMillis())))
+                            .collect(java.util.stream.Collectors.toList())));
+            break;
           default:
+            LOG.warn(
+                "ARRAY column '{}' has unsupported element type {}; falling back to stringArray.",
+                columnName,
+                elementType);
             builder
                 .set(columnName)
                 .to(
                     Value.stringArray(
                         list.stream()
-                            .map(Object::toString)
+                            .map(v -> v == null ? null : v.toString())
                             .collect(java.util.stream.Collectors.toList())));
         }
         break;

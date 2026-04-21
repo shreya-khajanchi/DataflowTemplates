@@ -166,6 +166,10 @@ public abstract class Column implements Serializable {
         return Type.Code.PG_JSONB.getName();
       case TOKENLIST:
         return Type.Code.TOKENLIST.getName();
+      case UUID:
+        return Type.Code.UUID.getName();
+      case PG_UUID:
+        return Type.Code.PG_UUID.getName();
       case ARRAY:
         {
           Type arrayType = type.getArrayElementType();
@@ -258,6 +262,10 @@ public abstract class Column implements Serializable {
       return type(Type.date());
     }
 
+    public Builder uuid() {
+      return type(Type.uuid());
+    }
+
     public Builder numeric() {
       return type(Type.numeric());
     }
@@ -296,6 +304,10 @@ public abstract class Column implements Serializable {
 
     public Builder pgDate() {
       return type(Type.pgDate());
+    }
+
+    public Builder pgUuid() {
+      return type(Type.pgUuid());
     }
 
     public Builder pgNumeric() {
@@ -383,6 +395,9 @@ public abstract class Column implements Serializable {
           if (spannerType.equals(Type.Code.TOKENLIST.getName())) {
             return t(Type.tokenlist(), null);
           }
+          if (spannerType.equals(Type.Code.UUID.getName())) {
+            return t(Type.uuid(), null);
+          }
           if (spannerType.startsWith(Type.Code.ARRAY.getName())) {
             // Substring "ARRAY<"xxx">"
             String spannerArrayType = spannerType.substring(6, spannerType.length() - 1);
@@ -437,6 +452,9 @@ public abstract class Column implements Serializable {
           }
           if (spannerType.equals(Type.Code.PG_DATE.getName())) {
             return t(Type.pgDate(), null);
+          }
+          if (spannerType.equals(Type.Code.PG_UUID.getName())) {
+            return t(Type.pgUuid(), null);
           }
           if (spannerType.equals(Type.Code.PG_COMMIT_TIMESTAMP.getName())) {
             return t(Type.pgCommitTimestamp(), null);

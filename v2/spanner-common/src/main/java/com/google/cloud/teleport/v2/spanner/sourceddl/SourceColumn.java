@@ -47,6 +47,15 @@ public abstract class SourceColumn implements Serializable {
 
   public abstract ImmutableList<String> columnOptions();
 
+  /**
+   * Full source-side type string when the database distinguishes it from {@link #type()}. For
+   * MySQL this corresponds to {@code information_schema.columns.column_type}, e.g. {@code
+   * "enum('a','b','c')"} or {@code "tinyint(1) unsigned"}. Returns {@code null} when no extra
+   * detail was captured (callers should fall back to {@link #type()}).
+   */
+  @Nullable
+  public abstract String fullType();
+
   public abstract SourceDatabaseType sourceType();
 
   public static Builder builder(SourceDatabaseType sourceType) {
@@ -80,6 +89,8 @@ public abstract class SourceColumn implements Serializable {
     public abstract Builder scale(Integer scale);
 
     public abstract Builder columnOptions(ImmutableList<String> columnOptions);
+
+    public abstract Builder fullType(String fullType);
 
     public abstract Builder sourceType(SourceDatabaseType sourceType);
 

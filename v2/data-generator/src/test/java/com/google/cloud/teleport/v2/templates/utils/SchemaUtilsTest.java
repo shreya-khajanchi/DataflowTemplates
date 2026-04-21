@@ -334,4 +334,182 @@ public class SchemaUtilsTest {
     assertEquals(0, dagSchema.tables().get("C2").childTables().size());
     assertEquals(0, dagSchema.tables().get("GC1").childTables().size());
   }
+
+  /**
+   * Bug A — sibling roots with a shared grandchild across lineages.
+   *
+   * <p>Schema shape:
+   *
+   * <pre>
+   *   R1 (root, qps=10)        R2 (root, qps=10)
+   *        |                         |
+   *        X (fk -> R1)              Y (fk -> R2)
+   *         \                       /
+   *          +---- Z (fk -> X, fk -> Y) ----+
+   * </pre>
+   *
+   * <p>R1 and R2 are two independent sibling roots with no FK between them. X is R1's only child,
+   * Y is R2's only child, and Z has FKs to BOTH X and Y (but not to R1 or R2 directly).
+   *
+   * <p>The current {@code setSchemaDAG} runs the QPS-sorted chaining on Z's parents and produces
+   * the DAG:
+   *
+   * <pre>
+   *   R1 -> X
+   *   R2 -> Y
+   *   X  -> Y    (SYNTHETIC edge from Z's QPS chain; no real FK relationship)
+   *   Y  -> Z
+   * </pre>
+   *
+   * <p>At runtime, {@code BatchAndWrite.generateChildRow} resolves every FK by looking the target
+   * table up in {@code ancestorRows}, which is populated only along the recursion path from a
+   * single ticking root. Walk each root's cascade:
+   *
+   * <ul>
+   *   <li>R1 ticks: path R1 -> X -> Y -> Z. At Y, {@code ancestorRows = {R1, X}}. Y's FK target R2
+   *       is NOT in the ancestor lineage, so Y's row is dropped (unresolvableFkChildrenDropped
+   *       metric increments). Z is never reached.
+   *   <li>R2 ticks: path R2 -> Y -> Z. At Z, {@code ancestorRows = {R2, Y}}. Z's FK target X is
+   *       NOT in the ancestor lineage, so Z's row is dropped.
+   * </ul>
+   *
+   * <p>Net: Z gets zero rows under any tick, and Y gets only half its expected cascade volume
+   * (only R2's path succeeds; R1's path silently drops Y mid-chain). This failure mode cannot be
+   * fixed by tweaking the QPS sort — the DAG stored in {@code childTables} is a single-parent
+   * tree, so no linearization of the parents can place BOTH R1's and R2's lineages upstream of Z
+   * simultaneously.
+   *
+   * <p>Options to fix:
+   *
+   * <ol>
+   *   <li>Reject this shape at load time in {@code validateNoDuplicateFkTargets} — e.g., fail if
+   *       any child table's FK targets live on sibling root chains that don't meet upstream.
+   *   <li>Redesign cascade dispatch to resolve cross-lineage FKs via state lookups rather than
+   *       relying purely on the recursion-path {@code ancestorRows}.
+   * </ol>
+   *
+   * <p>This test documents the current (buggy) DAG shape so the failure mode is visible; it does
+   * NOT assert the "correct" shape because the single-parent DAG representation cannot express
+   * it.
+   */
+  @Test
+  public void testDAGConstructionSiblingRootsSharedGrandchild_BugA() {
+    DataGeneratorTable r1 =
+        DataGeneratorTable.builder()
+            .name("R1")
+            .insertQps(10)
+            .columns(ImmutableList.of())
+            .primaryKeys(ImmutableList.of())
+            .foreignKeys(ImmutableList.of())
+            .uniqueKeys(ImmutableList.of())
+            .build();
+    DataGeneratorTable r2 =
+        DataGeneratorTable.builder()
+            .name("R2")
+            .insertQps(10)
+            .columns(ImmutableList.of())
+            .primaryKeys(ImmutableList.of())
+            .foreignKeys(ImmutableList.of())
+            .uniqueKeys(ImmutableList.of())
+            .build();
+    DataGeneratorTable x =
+        DataGeneratorTable.builder()
+            .name("X")
+            .insertQps(5)
+            .foreignKeys(
+                ImmutableList.of(
+                    DataGeneratorForeignKey.builder()
+                        .name("fk_r1")
+                        .keyColumns(ImmutableList.of("r1Id"))
+                        .referencedTable("R1")
+                        .referencedColumns(ImmutableList.of("id"))
+                        .build()))
+            .columns(ImmutableList.of())
+            .primaryKeys(ImmutableList.of())
+            .uniqueKeys(ImmutableList.of())
+            .build();
+    DataGeneratorTable y =
+        DataGeneratorTable.builder()
+            .name("Y")
+            .insertQps(7) // strictly less than X so QPS sort on Z's parents is deterministic
+            .foreignKeys(
+                ImmutableList.of(
+                    DataGeneratorForeignKey.builder()
+                        .name("fk_r2")
+                        .keyColumns(ImmutableList.of("r2Id"))
+                        .referencedTable("R2")
+                        .referencedColumns(ImmutableList.of("id"))
+                        .build()))
+            .columns(ImmutableList.of())
+            .primaryKeys(ImmutableList.of())
+            .uniqueKeys(ImmutableList.of())
+            .build();
+    DataGeneratorTable z =
+        DataGeneratorTable.builder()
+            .name("Z")
+            .insertQps(3)
+            .foreignKeys(
+                ImmutableList.of(
+                    DataGeneratorForeignKey.builder()
+                        .name("fk_x")
+                        .keyColumns(ImmutableList.of("xId"))
+                        .referencedTable("X")
+                        .referencedColumns(ImmutableList.of("id"))
+                        .build(),
+                    DataGeneratorForeignKey.builder()
+                        .name("fk_y")
+                        .keyColumns(ImmutableList.of("yId"))
+                        .referencedTable("Y")
+                        .referencedColumns(ImmutableList.of("id"))
+                        .build()))
+            .columns(ImmutableList.of())
+            .primaryKeys(ImmutableList.of())
+            .uniqueKeys(ImmutableList.of())
+            .build();
+
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .dialect(SinkDialect.GOOGLE_STANDARD_SQL)
+            .tables(ImmutableMap.of("R1", r1, "R2", r2, "X", x, "Y", y, "Z", z))
+            .build();
+
+    DataGeneratorSchema dagSchema = SchemaUtils.setSchemaDAG(schema);
+
+    // Both sibling roots remain roots — the QPS sort only chains parents within a single child's
+    // parents list, never across children. R1 and R2 never meet in the DAG.
+    assertTrue(dagSchema.tables().get("R1").isRoot());
+    assertTrue(dagSchema.tables().get("R2").isRoot());
+    assertFalse(dagSchema.tables().get("X").isRoot());
+    assertFalse(dagSchema.tables().get("Y").isRoot());
+    assertFalse(dagSchema.tables().get("Z").isRoot());
+
+    // R1 -> X (real FK edge, from X's own parents processing).
+    assertEquals(ImmutableList.of("X"), dagSchema.tables().get("R1").childTables());
+
+    // R2 -> Y (real FK edge, from Y's own parents processing).
+    assertEquals(ImmutableList.of("Y"), dagSchema.tables().get("R2").childTables());
+
+    // X -> Y is SYNTHETIC. Z's parents are [X, Y]; sorted ascending by QPS (X@5 < Y@7) the chain
+    // is X -> Y -> Z, so Y appears as a child of X even though there is no real FK between
+    // them. This is where the schema's two independent lineages collide.
+    assertEquals(ImmutableList.of("Y"), dagSchema.tables().get("X").childTables());
+
+    // Y -> Z (last link of Z's parent chain).
+    assertEquals(ImmutableList.of("Z"), dagSchema.tables().get("Y").childTables());
+
+    // Z has no children.
+    assertEquals(ImmutableList.of(), dagSchema.tables().get("Z").childTables());
+
+    // Key observation for Bug A: Y has TWO DAG parents now — R2 (real FK edge) and X (synthetic
+    // chain edge). At runtime, ancestorRows only contains the single root-to-child path taken,
+    // so neither root's cascade reaches Z with both of Z's FK targets resolved:
+    //
+    //   - R1 ticks: path R1 -> X -> Y -> Z. At Y, FK target R2 is missing from {R1, X}. Drop Y.
+    //     Z never reached.
+    //   - R2 ticks: path R2 -> Y -> Z. At Z, FK target X is missing from {R2, Y}. Drop Z.
+    //
+    // Either way, Z gets zero rows. Fixing this would require expressing a non-tree DAG for Z
+    // (two incoming edges from X and Y, both reachable from the root lineage), which the
+    // current single-parent childTables list cannot represent.
+  }
 }

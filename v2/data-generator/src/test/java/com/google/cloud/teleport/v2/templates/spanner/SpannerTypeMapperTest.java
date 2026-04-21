@@ -39,6 +39,7 @@ public class SpannerTypeMapperTest {
     verifyMapping(SinkDialect.GOOGLE_STANDARD_SQL, "NUMERIC", LogicalType.NUMERIC);
     verifyMapping(SinkDialect.GOOGLE_STANDARD_SQL, "BIGNUMERIC", LogicalType.NUMERIC);
     verifyMapping(SinkDialect.GOOGLE_STANDARD_SQL, "JSON", LogicalType.JSON);
+    verifyMapping(SinkDialect.GOOGLE_STANDARD_SQL, "UUID", LogicalType.UUID);
 
     // Parameterized types
     verifyMapping(SinkDialect.GOOGLE_STANDARD_SQL, "STRING(MAX)", LogicalType.STRING);
@@ -83,6 +84,7 @@ public class SpannerTypeMapperTest {
     verifyMapping(SinkDialect.POSTGRESQL, "numeric", LogicalType.NUMERIC);
     verifyMapping(SinkDialect.POSTGRESQL, "decimal", LogicalType.NUMERIC);
     verifyMapping(SinkDialect.POSTGRESQL, "jsonb", LogicalType.JSON);
+    verifyMapping(SinkDialect.POSTGRESQL, "uuid", LogicalType.UUID);
 
     // Parameterized PG types
     verifyMapping(SinkDialect.POSTGRESQL, "varchar(255)", LogicalType.STRING);

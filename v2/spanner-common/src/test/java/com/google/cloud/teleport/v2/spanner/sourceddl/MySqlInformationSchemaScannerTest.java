@@ -52,7 +52,7 @@ public class MySqlInformationSchemaScannerTest {
 
     // Mock column query
     when(stmt.executeQuery(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = 'testdb' AND table_name = 'users' "
@@ -61,6 +61,7 @@ public class MySqlInformationSchemaScannerTest {
     when(columnRs.next()).thenReturn(true, false);
     when(columnRs.getString("column_name")).thenReturn("id");
     when(columnRs.getString("data_type")).thenReturn("INT");
+    when(columnRs.getString("column_type")).thenReturn("int(10)");
     when(columnRs.getString("is_nullable")).thenReturn("NO");
     when(columnRs.getString("column_key")).thenReturn("PRI");
     when(columnRs.getString("character_maximum_length")).thenReturn("10");
@@ -140,7 +141,7 @@ public class MySqlInformationSchemaScannerTest {
     when(tableRs.getString(2)).thenReturn("testdb");
 
     when(stmt.executeQuery(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = 'testdb' AND table_name = 'empty_table' "
@@ -204,7 +205,7 @@ public class MySqlInformationSchemaScannerTest {
     when(tableRs.getString(2)).thenReturn("testdb");
 
     when(stmt.executeQuery(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = 'testdb' AND table_name = 'user$#@!' "
@@ -296,7 +297,7 @@ public class MySqlInformationSchemaScannerTest {
 
     // Simulate SQLException when scanning columns
     when(stmt.executeQuery(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = 'testdb' AND table_name = 'users' "
@@ -334,7 +335,7 @@ public class MySqlInformationSchemaScannerTest {
 
     // users table
     when(stmt.executeQuery(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = 'testdb' AND table_name = 'users' "
@@ -378,7 +379,7 @@ public class MySqlInformationSchemaScannerTest {
 
     // orders table
     when(stmt.executeQuery(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = 'testdb' AND table_name = 'orders' "
@@ -450,7 +451,7 @@ public class MySqlInformationSchemaScannerTest {
 
     // Columns
     when(stmt.executeQuery(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = 'testdb' AND table_name = 'child_table' "
@@ -531,7 +532,7 @@ public class MySqlInformationSchemaScannerTest {
 
     // Columns
     when(stmt.executeQuery(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = 'testdb' AND table_name = 'users' "

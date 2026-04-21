@@ -138,7 +138,7 @@ public class GeneratePrimaryKey
       Schema.Builder builder = Schema.builder();
       for (DataGeneratorColumn col : columns) {
         builder.addField(
-            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col)));
       }
       builder.addField(Schema.Field.of(Constants.SHARD_ID_COLUMN_NAME, Schema.FieldType.STRING));
       return builder.build();

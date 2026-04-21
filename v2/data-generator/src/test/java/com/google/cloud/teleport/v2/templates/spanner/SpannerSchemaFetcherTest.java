@@ -203,4 +203,43 @@ public class SpannerSchemaFetcherTest {
     assertEquals(1, tableResult.uniqueKeys().get(0).keyColumns().size());
     assertEquals("uniqueCol", tableResult.uniqueKeys().get(0).keyColumns().get(0));
   }
+
+  @Test
+  public void testGetSchemaWithUuidColumn() throws IOException {
+    // Covers the full UUID chain: Ddl Column.parseType("UUID") → Type.uuid() →
+    // SpannerSchemaFetcher.mapColumn → SpannerTypeMapper → LogicalType.UUID.
+    com.google.cloud.teleport.v2.spanner.ddl.Table table =
+        com.google.cloud.teleport.v2.spanner.ddl.Table.builder()
+            .name("t")
+            .column("id")
+            .parseType("UUID")
+            .endColumn()
+            .column("tags")
+            .parseType("ARRAY<UUID>")
+            .endColumn()
+            .primaryKeys(ImmutableList.of())
+            .build();
+
+    Ddl.Builder builder = Ddl.builder();
+    builder.addTable(table);
+    Ddl ddl = builder.build();
+    doReturn(ddl).when(fetcher).fetchDdl(any(SpannerConfig.class));
+
+    DataGeneratorSchema result = fetcher.getSchema();
+
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn idCol =
+        result.tables().get("t").columns().get(0);
+    assertEquals("id", idCol.name());
+    assertEquals(
+        com.google.cloud.teleport.v2.templates.model.LogicalType.UUID, idCol.logicalType());
+
+    // ARRAY<UUID> should map to ARRAY logical type with UUID element type so the
+    // writer emits a proper Value.stringArray of UUID hex strings (not lorem text).
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn tagsCol =
+        result.tables().get("t").columns().get(1);
+    assertEquals(
+        com.google.cloud.teleport.v2.templates.model.LogicalType.ARRAY, tagsCol.logicalType());
+    assertEquals(
+        com.google.cloud.teleport.v2.templates.model.LogicalType.UUID, tagsCol.elementType());
+  }
 }

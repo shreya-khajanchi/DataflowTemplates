@@ -42,7 +42,17 @@ public class GenerateTicks extends PTransform<PCollection<Long>, PCollection<Lon
 
   @Override
   public PCollection<Long> expand(PCollection<Long> input) {
-    int baseTickRate = options.getBaseTickRate() != null ? options.getBaseTickRate() : 1000;
+    // Mirrors the fallback in DataGenerator.run(): prefer --baseTickRate, else fall back to
+    // --insertQps (the user-declared total), else 1000. Keeping the fallback consistent across
+    // both sites avoids silent rate drift if one is edited without the other.
+    int baseTickRate =
+        options.getBaseTickRate() != null
+            ? options.getBaseTickRate()
+            : (options.getInsertQps() != null ? options.getInsertQps() : 1000);
+    if (baseTickRate <= 0) {
+      throw new IllegalArgumentException(
+          "baseTickRate must be > 0; got " + baseTickRate + ". Set --baseTickRate or --insertQps.");
+    }
     return input.apply(
         "ScaleTicks",
         ParDo.of(new ScaleTicksFn(schemaView, baseTickRate)).withSideInputs(schemaView));
@@ -79,25 +89,23 @@ public class GenerateTicks extends PTransform<PCollection<Long>, PCollection<Lon
         return; // No generation
       }
 
-      if (cachedTotalQps == baseTickRate) {
-        // Perfect match
-        c.output(c.element());
-      } else if (cachedTotalQps < baseTickRate) {
-        // Filter down: only output with probability (totalQps / baseTickRate)
+      if (cachedTotalQps < baseTickRate) {
+        // Filter down: emit each input with probability totalQps/baseTickRate. Expected output
+        // rate = baseTickRate * (totalQps/baseTickRate) = totalQps.
         double probability = (double) cachedTotalQps / baseTickRate;
         if (ThreadLocalRandom.current().nextDouble() < probability) {
           c.output(c.element());
         }
       } else {
-        // Scale up: output multiple times per incoming tick
+        // Scale up (or exact match — multiplier=1, remainder=0 handles totalQps==baseTickRate).
+        // Emit `multiplier` outputs deterministically, then probabilistically emit one more to
+        // cover the sub-tick remainder. Expected output per input = totalQps/baseTickRate.
         int multiplier = cachedTotalQps / baseTickRate;
         int remainder = cachedTotalQps % baseTickRate;
 
-        // Output exactly `multiplier` times
         for (int i = 0; i < multiplier; i++) {
           c.output(c.element());
         }
-        // Probabilistically output the remainder to smooth out the sub-tick distribution
         if (remainder > 0) {
           double probability = (double) remainder / baseTickRate;
           if (ThreadLocalRandom.current().nextDouble() < probability) {

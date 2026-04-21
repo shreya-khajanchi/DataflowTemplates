@@ -631,7 +631,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
           }
         }
         schemaBuilder.addField(
-            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col)));
         values.add(val);
       }
 
@@ -934,7 +934,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
       for (DataGeneratorColumn col : table.columns()) {
         schemaBuilder.addField(
-            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col)));
         if (col.isPrimaryKey()) {
           values.add(pkValues.get(col.name()));
         } else if (fkColumns.contains(col.name()) || uniqueColumns.contains(col.name())) {
@@ -957,7 +957,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       List<Object> values = new ArrayList<>();
 
       for (DataGeneratorColumn col : table.columns()) {
-        Schema.FieldType fieldType = DataGeneratorUtils.mapToBeamFieldType(col.logicalType());
+        Schema.FieldType fieldType = DataGeneratorUtils.mapToBeamFieldType(col);
         if (col.isPrimaryKey()) {
           schemaBuilder.addField(Schema.Field.of(col.name(), fieldType));
           values.add(pkValues.get(col.name()));
@@ -987,8 +987,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
             || fkColumns.contains(col.name())
             || uniqueColumns.contains(col.name())) {
           schemaBuilder.addField(
-              Schema.Field.of(
-                  col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+              Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col)));
           values.add(fullRow.getValue(col.name()));
         }
       }
@@ -1198,7 +1197,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
           }
         }
         schemaBuilder.addField(
-            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col.logicalType())));
+            Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col)));
         values.add(val);
       }
 
@@ -1270,8 +1269,14 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         case TIMESTAMP:
           return org.joda.time.Instant.ofEpochMilli(Math.floorMod(hash, 4102444800000L));
         case UUID:
-        case STRING:
+          // Valid 8-4-4-4-12 hex form is required by Postgres/Spanner UUID columns. Build a
+          // deterministic UUID from the 64-bit hash so uniqueness tracks the row's PKs.
+          return new java.util.UUID(hash, Long.reverse(hash)).toString();
         case JSON:
+          // Wrap the hash in a valid JSON object so columns with a JSON unique constraint get a
+          // valid document, not a bare string.
+          return "{\"uid\":\"" + Long.toHexString(hash) + "\"}";
+        case STRING:
         case ENUM:
         default:
           // Fit within declared size when known.

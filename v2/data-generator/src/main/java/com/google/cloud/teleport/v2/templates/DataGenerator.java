@@ -76,14 +76,26 @@ public class DataGenerator {
                 options.getInsertQps(),
                 options.getSchemaConfig()));
 
-    // Generate ticks based on schema QPS
-    int baseTickRate = options.getBaseTickRate() != null ? options.getBaseTickRate() : 1000;
+    // Generate ticks based on schema QPS.
+    //
+    // Default baseTickRate to the user-declared total insertQps so that in the common case
+    // totalRootQps (computed at runtime from the side input) ≈ baseTickRate, which keeps the
+    // scaling multiplier near 1 and avoids scale-up bursts. Explicit --baseTickRate still wins
+    // if the operator wants to pin it independently of --insertQps.
+    int baseTickRate =
+        options.getBaseTickRate() != null
+            ? options.getBaseTickRate()
+            : (options.getInsertQps() != null ? options.getInsertQps() : 1000);
     PCollection<DataGeneratorTable> ticks =
         pipeline
             .apply(
                 "TriggerTick",
                 org.apache.beam.sdk.io.GenerateSequence.from(0)
                     .withRate(baseTickRate, org.joda.time.Duration.standardSeconds(1)))
+            // Reshuffle BEFORE the scale-up multiplier so the fan-out parallelizes across
+            // workers. Without this, GenerateSequence fuses with ScaleTicksFn and a single
+            // worker handles all scaling, which caps throughput at very high totalRootQps.
+            .apply("ReshuffleForParallelScale", Reshuffle.viaRandomKey())
             .apply("GenerateTicks", new GenerateTicks(options, schemaView))
             .apply("ReshuffleProvider", Reshuffle.viaRandomKey())
             .apply("SelectTable", new SelectTable(schemaView));

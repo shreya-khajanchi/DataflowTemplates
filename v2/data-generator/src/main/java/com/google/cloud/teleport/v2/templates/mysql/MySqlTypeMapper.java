@@ -74,9 +74,12 @@ public class MySqlTypeMapper implements TypeMapper {
       case "TEXT":
       case "MEDIUMTEXT":
       case "LONGTEXT":
-      case "SET": // Added
         return LogicalType.STRING;
-      case "ENUM": // Added
+      case "ENUM":
+      case "SET":
+        // SET stores a comma-separated subset of an enum-like value list. A *single* member is
+        // always a valid SET value, so we reuse the ENUM generator (pick-one-from-list) to emit
+        // safe SET values without needing a dedicated logical type.
         return LogicalType.ENUM;
 
       case "BINARY":

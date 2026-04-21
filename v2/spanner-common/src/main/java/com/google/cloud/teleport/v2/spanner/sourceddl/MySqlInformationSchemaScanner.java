@@ -108,7 +108,7 @@ public class MySqlInformationSchemaScanner implements SourceSchemaScanner {
     List<SourceColumn> columns = new ArrayList<>();
     String query =
         String.format(
-            "SELECT column_name, data_type, character_maximum_length, "
+            "SELECT column_name, data_type, column_type, character_maximum_length, "
                 + "numeric_precision, numeric_scale, is_nullable, column_key, EXTRA "
                 + "FROM information_schema.columns "
                 + "WHERE table_schema = '%s' AND table_name = '%s' "
@@ -122,6 +122,7 @@ public class MySqlInformationSchemaScanner implements SourceSchemaScanner {
             SourceColumn.builder(sourceType)
                 .name(rs.getString("column_name"))
                 .type(rs.getString("data_type"))
+                .fullType(rs.getString("column_type"))
                 .isNullable("YES".equals(rs.getString("is_nullable")))
                 .isPrimaryKey("PRI".equals(rs.getString("column_key")));
 

@@ -17,12 +17,14 @@ package com.google.cloud.teleport.v2.templates.spanner;
 
 import com.google.cloud.teleport.v2.spanner.ddl.Ddl;
 import com.google.cloud.teleport.v2.spanner.migrations.spanner.SpannerSchema;
+import com.google.cloud.teleport.v2.spanner.type.Type;
 import com.google.cloud.teleport.v2.templates.common.SinkSchemaFetcher;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorSchema;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorTable;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorUniqueKey;
+import com.google.cloud.teleport.v2.templates.model.LogicalType;
 import com.google.cloud.teleport.v2.templates.model.SinkDialect;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -154,17 +156,34 @@ public class SpannerSchemaFetcher implements SinkSchemaFetcher {
     boolean isPrimaryKey =
         table.primaryKeys().stream().anyMatch(pk -> pk.name().equals(column.name()));
 
-    return DataGeneratorColumn.builder()
-        .name(column.name())
-        .logicalType(typeMapper.getLogicalType(column.typeString(), dialect))
-        .isNullable(!column.notNull())
-        .isPrimaryKey(isPrimaryKey)
-        .isGenerated(column.isGenerated())
-        .originalType(column.typeString())
-        .size(column.size() != null ? Long.valueOf(column.size()) : null)
-        .precision(null)
-        .scale(null)
-        .build();
+    DataGeneratorColumn.Builder builder =
+        DataGeneratorColumn.builder()
+            .name(column.name())
+            .logicalType(typeMapper.getLogicalType(column.typeString(), dialect))
+            .isNullable(!column.notNull())
+            .isPrimaryKey(isPrimaryKey)
+            .isGenerated(column.isGenerated())
+            .originalType(column.typeString())
+            .size(column.size() != null ? Long.valueOf(column.size()) : null)
+            .precision(null)
+            .scale(null);
+
+    // For ARRAY columns, propagate the element type so the generator and writer
+    // emit values of the correct type (otherwise everything degrades to STRING).
+    Type ddlType = column.type();
+    if (ddlType != null
+        && (ddlType.getCode() == Type.Code.ARRAY || ddlType.getCode() == Type.Code.PG_ARRAY)) {
+      Type elementDdlType = ddlType.getArrayElementType();
+      if (elementDdlType != null && elementDdlType.getCode() != null) {
+        // Code.getName() returns the dialect-appropriate name (e.g. "INT64" for GoogleSQL,
+        // "bigint" for PG), which is what the type mapper's switches expect.
+        LogicalType elementLogical =
+            typeMapper.getLogicalType(elementDdlType.getCode().getName(), dialect);
+        builder.elementType(elementLogical);
+      }
+    }
+
+    return builder.build();
   }
 
   protected SpannerAccessor getSpannerAccessor(SpannerConfig spannerConfig) {

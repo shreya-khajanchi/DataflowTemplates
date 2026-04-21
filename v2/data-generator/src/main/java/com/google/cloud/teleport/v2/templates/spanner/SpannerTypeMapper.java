@@ -63,6 +63,8 @@ public class SpannerTypeMapper implements TypeMapper {
           return LogicalType.NUMERIC;
         case "JSON":
           return LogicalType.JSON;
+        case "UUID":
+          return LogicalType.UUID;
         case "ARRAY":
           return LogicalType.ARRAY;
         case "STRUCT":
@@ -105,6 +107,8 @@ public class SpannerTypeMapper implements TypeMapper {
           return LogicalType.NUMERIC;
         case "JSONB":
           return LogicalType.JSON;
+        case "UUID":
+          return LogicalType.UUID;
         default:
           return LogicalType.STRING;
       }

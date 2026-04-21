@@ -34,11 +34,13 @@ public class TypeTest {
     assertEquals("BYTES", Type.bytes().toString());
     assertEquals("TIMESTAMP", Type.timestamp().toString());
     assertEquals("DATE", Type.date().toString());
+    assertEquals("UUID", Type.uuid().toString());
 
     // Array types
     assertEquals("ARRAY<INT64>", Type.array(Type.int64()).toString());
     assertEquals("ARRAY<STRING>", Type.array(Type.string()).toString());
     assertEquals("ARRAY<ARRAY<STRING>>", Type.array(Type.array(Type.string())).toString());
+    assertEquals("ARRAY<UUID>", Type.array(Type.uuid()).toString());
 
     // Struct type
     Type structType =

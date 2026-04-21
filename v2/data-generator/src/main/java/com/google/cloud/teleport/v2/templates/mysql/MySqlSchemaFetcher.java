@@ -176,10 +176,14 @@ public class MySqlSchemaFetcher implements SinkSchemaFetcher {
             .precision(column.precision())
             .scale(column.scale());
 
-    if (column.type() != null
-        && (column.type().toUpperCase().startsWith("ENUM")
-            || column.type().toUpperCase().startsWith("SET"))) {
-      builder.enumValues(parseEnumValues(column.type()));
+    // ENUM and SET need their member-value list, which lives in column_type (e.g.
+    // "enum('a','b','c')") — not data_type ("enum"). Prefer fullType() and fall back to type()
+    // for safety in case an upstream caller built a SourceColumn without the full string.
+    String typeForEnumParsing = column.fullType() != null ? column.fullType() : column.type();
+    if (typeForEnumParsing != null
+        && (typeForEnumParsing.toUpperCase().startsWith("ENUM")
+            || typeForEnumParsing.toUpperCase().startsWith("SET"))) {
+      builder.enumValues(parseEnumValues(typeForEnumParsing));
     }
 
     return builder.build();
