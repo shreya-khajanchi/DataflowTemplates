@@ -18,6 +18,7 @@ package com.google.cloud.teleport.v2.templates.transforms;
 import com.google.cloud.teleport.v2.templates.DataGeneratorOptions.SinkType;
 import com.google.cloud.teleport.v2.templates.common.SinkSchemaFetcher;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn;
+import com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorSchema;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorTable;
 import com.google.cloud.teleport.v2.templates.mysql.MySqlSchemaFetcher;
@@ -150,29 +151,12 @@ public class SchemaLoader extends PTransform<PBegin, PCollectionView<DataGenerat
         }
 
         if (tableConfig.has("columns")) {
-          JSONObject columnsConfig = tableConfig.getJSONObject("columns");
-          java.util.List<DataGeneratorColumn> updatedColumns = new java.util.ArrayList<>();
+          tableBuilder.columns(applyColumnOverrides(existingTable, tableConfig.getJSONObject("columns")));
+        }
 
-          for (DataGeneratorColumn col : existingTable.columns()) {
-            if (columnsConfig.has(col.name())) {
-              JSONObject colConfig = columnsConfig.getJSONObject(col.name());
-              DataGeneratorColumn.Builder colBuilder = col.toBuilder();
-
-              if (colConfig.has("generator")) {
-                String gen = colConfig.getString("generator");
-                if (!"inherited".equals(gen)) {
-                  colBuilder.generator(gen);
-                }
-              }
-              if (colConfig.has("skip")) {
-                colBuilder.skip(colConfig.getBoolean("skip"));
-              }
-              updatedColumns.add(colBuilder.build());
-            } else {
-              updatedColumns.add(col);
-            }
-          }
-          tableBuilder.columns(com.google.common.collect.ImmutableList.copyOf(updatedColumns));
+        if (tableConfig.has("foreignKeys")) {
+          tableBuilder.foreignKeys(
+              mergeForeignKeys(existingTable, tableConfig.getJSONArray("foreignKeys")));
         }
 
         tableMap.put(tableName, tableBuilder.build());
@@ -182,6 +166,139 @@ public class SchemaLoader extends PTransform<PBegin, PCollectionView<DataGenerat
           .tables(com.google.common.collect.ImmutableMap.copyOf(tableMap))
           .dialect(schema.dialect())
           .build();
+    }
+
+    /**
+     * Applies per-column overrides keyed by column name. Validates {@code skip=true} is never set
+     * on a primary-key column — PKs power state-keying and lifecycle scheduling, so dropping them
+     * from generation would silently break the pipeline. Normalises {@code generator} expressions
+     * so users can write either {@code "#{name.fullName}"} or {@code "name.fullName"}.
+     */
+    private com.google.common.collect.ImmutableList<DataGeneratorColumn> applyColumnOverrides(
+        DataGeneratorTable existingTable, JSONObject columnsConfig) {
+      java.util.List<DataGeneratorColumn> updatedColumns = new java.util.ArrayList<>();
+      for (DataGeneratorColumn col : existingTable.columns()) {
+        if (!columnsConfig.has(col.name())) {
+          updatedColumns.add(col);
+          continue;
+        }
+        JSONObject colConfig = columnsConfig.getJSONObject(col.name());
+        DataGeneratorColumn.Builder colBuilder = col.toBuilder();
+
+        if (colConfig.has("generator")) {
+          String gen = colConfig.getString("generator");
+          if (!"inherited".equals(gen)) {
+            colBuilder.generator(normalizeFakerExpression(gen));
+          }
+        }
+        if (colConfig.has("skip")) {
+          boolean skip = colConfig.getBoolean("skip");
+          if (skip && col.isPrimaryKey()) {
+            throw new IllegalArgumentException(
+                "Cannot skip primary-key column '"
+                    + col.name()
+                    + "' in table '"
+                    + existingTable.name()
+                    + "': PK values are required for state-keying and lifecycle events.");
+          }
+          colBuilder.skip(skip);
+        }
+        updatedColumns.add(colBuilder.build());
+      }
+      return com.google.common.collect.ImmutableList.copyOf(updatedColumns);
+    }
+
+    /**
+     * Wraps a bare Faker directive in {@code #{...}} when needed so {@link
+     * com.github.javafaker.Faker#expression} can evaluate it. Inputs that already include the
+     * delimiters are returned unchanged.
+     */
+    static String normalizeFakerExpression(String expr) {
+      if (expr == null) {
+        return null;
+      }
+      String trimmed = expr.trim();
+      if (trimmed.startsWith("#{") && trimmed.endsWith("}")) {
+        return trimmed;
+      }
+      return "#{" + trimmed + "}";
+    }
+
+    /**
+     * Merges info-schema-discovered FKs with the override list keyed by FK {@code name}.
+     *
+     * <ul>
+     *   <li>FK names present only in the discovered list are preserved unchanged.
+     *   <li>FK names present only in the config are appended.
+     *   <li>FK names present in both must agree on {@code referencedTable}, {@code keyColumns},
+     *       and {@code referencedColumns}; mismatches throw an {@link IllegalArgumentException}
+     *       naming the table and the conflicting fields. The user is expected to either remove
+     *       the FK from the discovered set (impossible without a config flag) or align the
+     *       config with reality. We choose to fail loudly because silent precedence would make
+     *       it hard to reason about which definition won.
+     * </ul>
+     */
+    private com.google.common.collect.ImmutableList<DataGeneratorForeignKey> mergeForeignKeys(
+        DataGeneratorTable existingTable, JSONArray fkArray) {
+      java.util.LinkedHashMap<String, DataGeneratorForeignKey> byName = new java.util.LinkedHashMap<>();
+      for (DataGeneratorForeignKey fk : existingTable.foreignKeys()) {
+        byName.put(fk.name(), fk);
+      }
+
+      for (int i = 0; i < fkArray.length(); i++) {
+        JSONObject fkConfig = fkArray.getJSONObject(i);
+        String fkName = fkConfig.getString("name");
+        String referencedTable = fkConfig.getString("referencedTable");
+        java.util.List<String> keyCols = jsonArrayToStringList(fkConfig.getJSONArray("keyColumns"));
+        java.util.List<String> refCols =
+            jsonArrayToStringList(fkConfig.getJSONArray("referencedColumns"));
+
+        DataGeneratorForeignKey configured =
+            DataGeneratorForeignKey.builder()
+                .name(fkName)
+                .referencedTable(referencedTable)
+                .keyColumns(com.google.common.collect.ImmutableList.copyOf(keyCols))
+                .referencedColumns(com.google.common.collect.ImmutableList.copyOf(refCols))
+                .build();
+
+        DataGeneratorForeignKey discovered = byName.get(fkName);
+        if (discovered != null && !fkEquivalent(discovered, configured)) {
+          throw new IllegalArgumentException(
+              "Foreign key '"
+                  + fkName
+                  + "' on table '"
+                  + existingTable.name()
+                  + "' conflicts with the discovered definition. discovered=[refTable="
+                  + discovered.referencedTable()
+                  + ", keyColumns="
+                  + discovered.keyColumns()
+                  + ", referencedColumns="
+                  + discovered.referencedColumns()
+                  + "], config=[refTable="
+                  + configured.referencedTable()
+                  + ", keyColumns="
+                  + configured.keyColumns()
+                  + ", referencedColumns="
+                  + configured.referencedColumns()
+                  + "]. Align the config with the source schema or rename the FK.");
+        }
+        byName.put(fkName, configured);
+      }
+      return com.google.common.collect.ImmutableList.copyOf(byName.values());
+    }
+
+    private static boolean fkEquivalent(DataGeneratorForeignKey a, DataGeneratorForeignKey b) {
+      return a.referencedTable().equals(b.referencedTable())
+          && a.keyColumns().equals(b.keyColumns())
+          && a.referencedColumns().equals(b.referencedColumns());
+    }
+
+    private static java.util.List<String> jsonArrayToStringList(JSONArray arr) {
+      java.util.List<String> out = new java.util.ArrayList<>(arr.length());
+      for (int i = 0; i < arr.length(); i++) {
+        out.add(arr.getString(i));
+      }
+      return out;
     }
 
     /**

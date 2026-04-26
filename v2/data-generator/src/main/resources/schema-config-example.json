@@ -1,0 +1,64 @@
+{
+  "tables": [
+    {
+      "tableName": "users",
+
+      "// Table-level QPS overrides. Any field omitted inherits the pipeline-global QPS.": "",
+      "// Explicit 0 means 'never generate this op for this table' (vs. omit which inherits).": "",
+      "insertQps": 200,
+      "updateQps": 50,
+      "deleteQps": 5,
+
+      "// Column overrides keyed by column name. Only listed columns are affected; the rest": "",
+      "// keep the values discovered from the source DB schema.": "",
+      "columns": {
+        "email": {
+          "// Java Faker expression. Either '#{name.fullName}' or 'name.fullName' is accepted;": "",
+          "// the loader normalises both into the form Faker.expression(...) understands.": "",
+          "generator": "#{internet.emailAddress}"
+        },
+        "full_name": {
+          "generator": "#{name.fullName}"
+        },
+        "country_code": {
+          "generator": "#{options.option 'US','GB','DE','JP','BR'}"
+        },
+        "internal_audit_blob": {
+          "// skip=true removes the column from the generated row entirely. The sink writes": "",
+          "// the column's DEFAULT (or NULL if no default), so the column must be nullable": "",
+          "// or have a server-side default in the source schema. PK columns cannot be skipped.": "",
+          "skip": true
+        }
+      }
+    },
+
+    {
+      "tableName": "orders",
+      "insertQps": 1000,
+      "updateQps": 0,
+      "deleteQps": 0,
+      "columns": {
+        "amount_cents": {
+          "generator": "#{number.numberBetween '100','100000'}"
+        },
+        "currency": {
+          "generator": "#{options.option 'USD','EUR','GBP','JPY'}"
+        }
+      },
+
+      "// Foreign-key overrides. When this array is PRESENT, it FULLY REPLACES the FKs": "",
+      "// discovered from the source schema for this table — useful when the source DB": "",
+      "// doesn't declare FKs (common in MySQL) but the application enforces them, or": "",
+      "// when you want to drop noisy FKs from generation. Omit the field to keep the": "",
+      "// discovered FKs untouched. Use 'foreignKeys: []' to drop all FKs for the table.": "",
+      "foreignKeys": [
+        {
+          "name": "fk_orders_user",
+          "referencedTable": "users",
+          "keyColumns": ["user_id"],
+          "referencedColumns": ["id"]
+        }
+      ]
+    }
+  ]
+}

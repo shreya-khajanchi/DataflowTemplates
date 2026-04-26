@@ -63,7 +63,9 @@ public class BatchAndWriteTest implements Serializable {
 
   @Rule public final transient TestPipeline pipeline = TestPipeline.create();
   @Rule public final MockitoRule mockito = MockitoJUnit.rule();
-  @Mock private DoFn<KV<String, Row>, Void>.ProcessContext mockContext;
+  @Mock private DoFn<KV<String, Row>, String>.ProcessContext mockContext;
+  @Mock private DoFn<KV<String, Row>, String>.OnTimerContext mockOnTimerContext;
+  @Mock private DoFn<KV<String, Row>, String>.FinishBundleContext mockFinishBundleContext;
 
   @Test
   @Ignore("DirectRunner creates new DoFn instance per element, cannot test batch > 1 this way")
@@ -342,7 +344,7 @@ public class BatchAndWriteTest implements Serializable {
         mockActiveTimestamps,
         new FakeMapState<>(),
         mockEventTimer);
-    fn.finishBundle();
+    fn.finishBundle(mockFinishBundleContext);
 
     // Verify Parent Flush
     verify(mockWriter).write(anyList(), eq(parentTable), eq(""), eq("INSERT"));
@@ -435,7 +437,7 @@ public class BatchAndWriteTest implements Serializable {
         mockActiveTimestamps,
         new FakeMapState<>(),
         mockEventTimer);
-    fn.finishBundle();
+    fn.finishBundle(mockFinishBundleContext);
 
     // Verify that events were scheduled (1 update, 1 delete)
     verify(mockEventQueueState, times(2))
@@ -557,7 +559,7 @@ public class BatchAndWriteTest implements Serializable {
         mockActiveTimestamps,
         new FakeMapState<>(),
         mockEventTimer);
-    fn.finishBundle();
+    fn.finishBundle(mockFinishBundleContext);
 
     // No need to capture, just read from fakeEventQueueState!
     java.util.TreeMap<Long, List<BatchAndWrite.LifecycleEvent>> finalQueue =
@@ -868,7 +870,7 @@ public class BatchAndWriteTest implements Serializable {
         mockActiveTimestamps,
         new FakeMapState<>(),
         mockEventTimer);
-    fn.finishBundle();
+    fn.finishBundle(mockFinishBundleContext);
 
     // We used doAnswer to capture writes!
 
@@ -974,5 +976,253 @@ public class BatchAndWriteTest implements Serializable {
     org.junit.Assert.assertEquals("parent_1", updateRow.getString("parent_id"));
     org.junit.Assert.assertEquals("user@example.com", updateRow.getString("email"));
     org.junit.Assert.assertNotNull(updateRow.getString("name"));
+  }
+
+  /**
+   * Sink-write failures should be captured per-row into the DLQ output PCollection rather than
+   * propagating as exceptions that crash the bundle. Each rejected row produces exactly one
+   * failure record, all stamped with the originating table and operation.
+   */
+  @Test
+  public void testWriteFailuresAreEmittedToDlq() throws Exception {
+    DataGeneratorOptions options = mock(DataGeneratorOptions.class);
+    when(options.getBatchSize()).thenReturn(100);
+    when(options.getSinkType()).thenReturn(DataGeneratorOptions.SinkType.SPANNER);
+    when(options.getSinkOptions()).thenReturn("{\"type\":\"spanner\"}");
+    when(options.as(com.google.cloud.teleport.v2.templates.DataGeneratorOptions.class))
+        .thenReturn(options);
+    when(options.getInsertQps()).thenReturn(1);
+    when(options.getUpdateQps()).thenReturn(0);
+    when(options.getDeleteQps()).thenReturn(0);
+
+    DataWriter throwingWriter = mock(DataWriter.class);
+    org.mockito.Mockito.doThrow(new RuntimeException("sink unavailable"))
+        .when(throwingWriter)
+        .write(anyList(), any(), any(), any());
+
+    DataGeneratorTable table =
+        DataGeneratorTable.builder()
+            .name("Users")
+            .columns(
+                ImmutableList.of(
+                    DataGeneratorColumn.builder()
+                        .name("id")
+                        .logicalType(LogicalType.INT64)
+                        .isPrimaryKey(true)
+                        .isNullable(false)
+                        .isGenerated(false)
+                        .originalType("INT64")
+                        .build()))
+            .primaryKeys(ImmutableList.of("id"))
+            .insertQps(1)
+            .isRoot(true)
+            .foreignKeys(ImmutableList.of())
+            .uniqueKeys(ImmutableList.of())
+            .build();
+
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .dialect(SinkDialect.GOOGLE_STANDARD_SQL)
+            .tables(ImmutableMap.of(table.name(), table))
+            .build();
+
+    Schema pkSchema = Schema.builder().addField("id", Schema.FieldType.INT64).build();
+    Row pkRow = Row.withSchema(pkSchema).addValue(42L).build();
+    KV<String, Row> inputElement = KV.of(table.name(), pkRow);
+
+    when(mockContext.element()).thenReturn(inputElement);
+    PCollectionView<DataGeneratorSchema> schemaView =
+        pipeline
+            .apply("CreateSchemaDlq", Create.of(schema))
+            .apply("ViewAsSingletonDlq", View.asSingleton());
+    when(mockContext.sideInput(schemaView)).thenReturn(schema);
+    pipeline.run();
+
+    TestBatchAndWriteFn fn = new TestBatchAndWriteFn(options, schemaView, throwingWriter);
+
+    org.apache.beam.sdk.state.MapState<String, Row> mockActiveKeys =
+        mock(org.apache.beam.sdk.state.MapState.class);
+    org.apache.beam.sdk.state.ReadableState<Row> mockReadable =
+        mock(org.apache.beam.sdk.state.ReadableState.class);
+    when(mockActiveKeys.get(any())).thenReturn(mockReadable);
+    when(mockReadable.read()).thenReturn(null);
+    org.apache.beam.sdk.state.MapState<Long, List<BatchAndWrite.LifecycleEvent>>
+        mockEventQueueState = new FakeMapState<>();
+    org.apache.beam.sdk.state.Timer mockEventTimer = mock(org.apache.beam.sdk.state.Timer.class);
+    org.apache.beam.sdk.state.ValueState<List<Long>> mockActiveTimestamps =
+        mock(org.apache.beam.sdk.state.ValueState.class);
+
+    fn.setup(options);
+    fn.startBundle();
+    fn.processElement(
+        mockContext,
+        mockActiveKeys,
+        mockEventQueueState,
+        mockActiveTimestamps,
+        new FakeMapState<>(),
+        mockEventTimer);
+    // First flush happens during finishBundle (batch size 100, only one row buffered).
+    fn.finishBundle(mockFinishBundleContext);
+
+    // Every rejected row produces a single DLQ record. With one inserted row we expect exactly
+    // one record on the FinishBundleContext output.
+    verify(mockFinishBundleContext, times(1))
+        .output(
+            org.mockito.ArgumentMatchers.contains("\"table\":\"Users\""),
+            any(org.joda.time.Instant.class),
+            any(org.apache.beam.sdk.transforms.windowing.BoundedWindow.class));
+    verify(mockFinishBundleContext, times(1))
+        .output(
+            org.mockito.ArgumentMatchers.contains("sink unavailable"),
+            any(org.joda.time.Instant.class),
+            any(org.apache.beam.sdk.transforms.windowing.BoundedWindow.class));
+  }
+
+  /**
+   * When sink writes succeed, the DLQ output stays empty. Guards against accidentally routing
+   * happy-path rows through the failure path in future refactors.
+   */
+  @Test
+  public void testNoDlqOnHappyPath() throws Exception {
+    DataGeneratorOptions options = mock(DataGeneratorOptions.class);
+    when(options.getBatchSize()).thenReturn(100);
+    when(options.getSinkType()).thenReturn(DataGeneratorOptions.SinkType.SPANNER);
+    when(options.getSinkOptions()).thenReturn("{\"type\":\"spanner\"}");
+    when(options.as(com.google.cloud.teleport.v2.templates.DataGeneratorOptions.class))
+        .thenReturn(options);
+    when(options.getInsertQps()).thenReturn(1);
+    when(options.getUpdateQps()).thenReturn(0);
+    when(options.getDeleteQps()).thenReturn(0);
+
+    DataWriter okWriter = mock(DataWriter.class);
+
+    DataGeneratorTable table =
+        DataGeneratorTable.builder()
+            .name("Users")
+            .columns(
+                ImmutableList.of(
+                    DataGeneratorColumn.builder()
+                        .name("id")
+                        .logicalType(LogicalType.INT64)
+                        .isPrimaryKey(true)
+                        .isNullable(false)
+                        .isGenerated(false)
+                        .originalType("INT64")
+                        .build()))
+            .primaryKeys(ImmutableList.of("id"))
+            .insertQps(1)
+            .isRoot(true)
+            .foreignKeys(ImmutableList.of())
+            .uniqueKeys(ImmutableList.of())
+            .build();
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .dialect(SinkDialect.GOOGLE_STANDARD_SQL)
+            .tables(ImmutableMap.of(table.name(), table))
+            .build();
+
+    Schema pkSchema = Schema.builder().addField("id", Schema.FieldType.INT64).build();
+    Row pkRow = Row.withSchema(pkSchema).addValue(7L).build();
+    KV<String, Row> inputElement = KV.of(table.name(), pkRow);
+
+    when(mockContext.element()).thenReturn(inputElement);
+    PCollectionView<DataGeneratorSchema> schemaView =
+        pipeline
+            .apply("CreateSchemaHappy", Create.of(schema))
+            .apply("ViewAsSingletonHappy", View.asSingleton());
+    when(mockContext.sideInput(schemaView)).thenReturn(schema);
+    pipeline.run();
+
+    TestBatchAndWriteFn fn = new TestBatchAndWriteFn(options, schemaView, okWriter);
+
+    org.apache.beam.sdk.state.MapState<String, Row> mockActiveKeys =
+        mock(org.apache.beam.sdk.state.MapState.class);
+    org.apache.beam.sdk.state.ReadableState<Row> mockReadable =
+        mock(org.apache.beam.sdk.state.ReadableState.class);
+    when(mockActiveKeys.get(any())).thenReturn(mockReadable);
+    when(mockReadable.read()).thenReturn(null);
+    org.apache.beam.sdk.state.MapState<Long, List<BatchAndWrite.LifecycleEvent>>
+        mockEventQueueState = new FakeMapState<>();
+    org.apache.beam.sdk.state.Timer mockEventTimer = mock(org.apache.beam.sdk.state.Timer.class);
+    org.apache.beam.sdk.state.ValueState<List<Long>> mockActiveTimestamps =
+        mock(org.apache.beam.sdk.state.ValueState.class);
+
+    fn.setup(options);
+    fn.startBundle();
+    fn.processElement(
+        mockContext,
+        mockActiveKeys,
+        mockEventQueueState,
+        mockActiveTimestamps,
+        new FakeMapState<>(),
+        mockEventTimer);
+    fn.finishBundle(mockFinishBundleContext);
+
+    // No DLQ output expected on the happy path.
+    org.mockito.Mockito.verifyNoInteractions(mockFinishBundleContext);
+    org.mockito.Mockito.verify(mockContext, org.mockito.Mockito.never())
+        .output(org.mockito.ArgumentMatchers.anyString());
+  }
+
+  /** {@link FailureRecord#toJson} should produce a parseable JSON object with the expected keys. */
+  @Test
+  public void testFailureRecordJsonShape() {
+    org.apache.beam.sdk.schemas.Schema schema =
+        org.apache.beam.sdk.schemas.Schema.builder()
+            .addField("id", org.apache.beam.sdk.schemas.Schema.FieldType.INT64)
+            .addField("name", org.apache.beam.sdk.schemas.Schema.FieldType.STRING)
+            .build();
+    org.apache.beam.sdk.values.Row row =
+        org.apache.beam.sdk.values.Row.withSchema(schema).addValues(7L, "alice").build();
+    String json =
+        com.google.cloud.teleport.v2.templates.utils.FailureRecord.toJson(
+            "Users", "INSERT", row, new IllegalStateException("boom"));
+
+    org.json.JSONObject obj = new org.json.JSONObject(json);
+    org.junit.Assert.assertEquals("Users", obj.getString("table"));
+    org.junit.Assert.assertEquals("INSERT", obj.getString("operation"));
+    org.junit.Assert.assertNotNull(obj.getString("timestamp"));
+    org.json.JSONObject errorObj = obj.getJSONObject("error");
+    org.junit.Assert.assertEquals(
+        "java.lang.IllegalStateException", errorObj.getString("class"));
+    org.junit.Assert.assertEquals("boom", errorObj.getString("message"));
+    org.json.JSONObject rowObj = obj.getJSONObject("row");
+    org.junit.Assert.assertEquals(7L, rowObj.getLong("id"));
+    org.junit.Assert.assertEquals("alice", rowObj.getString("name"));
+  }
+
+  /** {@link FailureRecord#toJson} must handle a null row (early-stage failures) without NPE. */
+  @Test
+  public void testFailureRecordJsonNullRow() {
+    String json =
+        com.google.cloud.teleport.v2.templates.utils.FailureRecord.toJson(
+            "Users",
+            com.google.cloud.teleport.v2.templates.utils.FailureRecord.OPERATION_GENERATION,
+            null,
+            new RuntimeException("upstream collapsed"));
+    org.json.JSONObject obj = new org.json.JSONObject(json);
+    org.junit.Assert.assertEquals("Users", obj.getString("table"));
+    org.junit.Assert.assertEquals("GENERATION", obj.getString("operation"));
+    org.junit.Assert.assertTrue(obj.isNull("row"));
+    org.junit.Assert.assertEquals(
+        "upstream collapsed", obj.getJSONObject("error").getString("message"));
+  }
+
+  /** {@link FailureRecord} canonicalises byte arrays to hex so the JSON stays printable. */
+  @Test
+  public void testFailureRecordHexEncodesBytes() {
+    org.apache.beam.sdk.schemas.Schema schema =
+        org.apache.beam.sdk.schemas.Schema.builder()
+            .addField("payload", org.apache.beam.sdk.schemas.Schema.FieldType.BYTES)
+            .build();
+    org.apache.beam.sdk.values.Row row =
+        org.apache.beam.sdk.values.Row.withSchema(schema)
+            .addValues((Object) new byte[] {0x0a, (byte) 0xff})
+            .build();
+    String json =
+        com.google.cloud.teleport.v2.templates.utils.FailureRecord.toJson(
+            "Bin", "INSERT", row, new RuntimeException("err"));
+    org.json.JSONObject obj = new org.json.JSONObject(json);
+    org.junit.Assert.assertEquals("0x0aff", obj.getJSONObject("row").getString("payload"));
   }
 }

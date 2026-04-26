@@ -94,6 +94,12 @@ public class SpannerDataWriter implements DataWriter {
 
   Mutation rowToMutation(DataGeneratorTable table, Row row, Mutation.WriteBuilder builder) {
     for (DataGeneratorColumn col : table.columns()) {
+      // skip=true columns are intentionally absent from the generated row, so they must also be
+      // absent from the mutation. Spanner will use the column's default (or NULL) on insert and
+      // leave it untouched on update.
+      if (col.skip()) {
+        continue;
+      }
       Object val = getFieldFromRow(row, col.name());
       setColumnValueFromLogicalType(builder, col, val);
     }

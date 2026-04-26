@@ -26,6 +26,7 @@ import com.google.cloud.teleport.v2.templates.model.DataGeneratorSchema;
 import com.google.cloud.teleport.v2.templates.model.DataGeneratorTable;
 import com.google.cloud.teleport.v2.templates.utils.Constants;
 import com.google.cloud.teleport.v2.templates.utils.DataGeneratorUtils;
+import com.google.cloud.teleport.v2.templates.utils.FailureRecord;
 import com.google.cloud.teleport.v2.templates.writer.DataWriter;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -50,11 +51,12 @@ import org.apache.beam.sdk.state.TimerSpecs;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindow;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionView;
-import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.Row;
+import org.joda.time.Instant;
 
 /**
  * A {@link PTransform} that generates the remaining columns for a record, batches them, and writes
@@ -69,8 +71,13 @@ import org.apache.beam.sdk.values.Row;
  *       (reverse-topological order) so parents are never removed while dependents still exist.
  *   <li><b>UPDATE</b> events have no ordering requirement among themselves.
  * </ul>
+ *
+ * <p>The output {@code PCollection<String>} carries dead-letter records — JSON-encoded failures
+ * produced when row generation throws or the sink rejects a batch. Callers should pipe this output
+ * to {@link WriteFailuresToGcs} (or another sink) when a {@code deadLetterQueueDirectory} is
+ * configured. When no failures occur, the output is empty.
  */
-public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDone> {
+public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PCollection<String>> {
 
   private final String sinkType;
   private final String sinkOptionsPath;
@@ -89,12 +96,13 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
   }
 
   @Override
-  public PDone expand(PCollection<KV<String, Row>> input) {
-    input.apply(
-        "BatchAndWriteFn",
-        ParDo.of(new BatchAndWriteFn(sinkType, sinkOptionsPath, batchSize, schemaView))
-            .withSideInputs(schemaView));
-    return PDone.in(input.getPipeline());
+  public PCollection<String> expand(PCollection<KV<String, Row>> input) {
+    return input
+        .apply(
+            "BatchAndWriteFn",
+            ParDo.of(new BatchAndWriteFn(sinkType, sinkOptionsPath, batchSize, schemaView))
+                .withSideInputs(schemaView))
+        .setCoder(org.apache.beam.sdk.coders.StringUtf8Coder.of());
   }
 
   /**
@@ -121,7 +129,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
   }
 
-  static class BatchAndWriteFn extends DoFn<KV<String, Row>, Void> {
+  static class BatchAndWriteFn extends DoFn<KV<String, Row>, String> {
     private final String sinkType;
     private final String sinkOptionsPath;
     private final Integer configuredBatchSize;
@@ -162,6 +170,18 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     private transient int insertQps;
     private transient int updateQps;
     private transient int deleteQps;
+
+    /**
+     * Per-bundle accumulator for dead-letter records. {@link #flush(String)} catches sink-write
+     * exceptions and pushes one JSON failure per row in the failed batch into this list. Each
+     * lifecycle method (process / timer / finishBundle) drains the list into its own output
+     * context so the records flow downstream regardless of where the failure happened.
+     */
+    private transient List<String> pendingDlq;
+
+    private final Counter writeFailures = Metrics.counter(BatchAndWriteFn.class, "writeFailures");
+    private final Counter generationFailures =
+        Metrics.counter(BatchAndWriteFn.class, "generationFailures");
 
     private static final org.slf4j.Logger LOG =
         org.slf4j.LoggerFactory.getLogger(BatchAndWriteFn.class);
@@ -294,6 +314,22 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     @StartBundle
     public void startBundle() {
       this.buffers = new HashMap<>();
+      this.pendingDlq = new ArrayList<>();
+    }
+
+    /**
+     * Drains {@link #pendingDlq} into the supplied output sink (typically {@code
+     * ProcessContext::output} or {@code OnTimerContext::output}) and clears the buffer. Safe to
+     * call when the buffer is null or empty.
+     */
+    private void drainPendingDlq(java.util.function.Consumer<String> sink) {
+      if (pendingDlq == null || pendingDlq.isEmpty()) {
+        return;
+      }
+      for (String record : pendingDlq) {
+        sink.accept(record);
+      }
+      pendingDlq.clear();
     }
 
     @ProcessElement
@@ -333,18 +369,28 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
       // Root-level call: no sticky shard yet (will be chosen in processTable), no ancestor delete
       // constraint.
-      processTable(
-          table,
-          row,
-          activeKeys,
-          eventQueueState,
-          activeTimestamps,
-          tableMapState,
-          eventTimer,
-          /* forcedDeleteTimestamp= */ 0L,
-          /* earliestAncestorDelete= */ Long.MAX_VALUE,
-          /* stickyShardId= */ null,
-          new HashMap<>());
+      try {
+        processTable(
+            table,
+            row,
+            activeKeys,
+            eventQueueState,
+            activeTimestamps,
+            tableMapState,
+            eventTimer,
+            /* forcedDeleteTimestamp= */ 0L,
+            /* earliestAncestorDelete= */ Long.MAX_VALUE,
+            /* stickyShardId= */ null,
+            new HashMap<>());
+      } catch (Exception genError) {
+        LOG.error("Generation failed for table {}", tableName, genError);
+        generationFailures.inc();
+        pendingDlq.add(
+            FailureRecord.toJson(
+                tableName, FailureRecord.OPERATION_GENERATION, row, genError));
+      }
+
+      drainPendingDlq(c::output);
     }
 
     /**
@@ -602,33 +648,19 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         }
       }
 
-      // Compute the PK up front so unique-column derivations can hash against it.
-      LinkedHashMap<String, Object> provisionalPk = new LinkedHashMap<>();
-      for (String pkCol : childTable.primaryKeys()) {
-        Object v = columnValues.get(pkCol);
-        if (v == null) {
-          DataGeneratorColumn col = findColumn(childTable, pkCol);
-          if (col != null) {
-            v = generateValue(col);
-            columnValues.put(pkCol, v);
-          }
-        }
-        provisionalPk.put(pkCol, v);
-      }
-
-      Set<String> uniqueCols = uniqueColumnNames(childTable);
-
       Schema.Builder schemaBuilder = Schema.builder();
       List<Object> values = new ArrayList<>();
 
       for (DataGeneratorColumn col : childTable.columns()) {
+        // skip=true columns are excluded from the emitted row schema entirely so the sink
+        // writes its DEFAULT (or NULL) for them. PK columns can never be skipped — that's
+        // enforced at schema-config load time in SchemaLoader.applyOverrides.
+        if (col.skip()) {
+          continue;
+        }
         Object val = columnValues.get(col.name());
         if (val == null) {
-          if (uniqueCols.contains(col.name())) {
-            val = deriveUniqueValue(col, childTable.name(), provisionalPk);
-          } else {
-            val = generateValue(col);
-          }
+          val = generateValue(col);
         }
         schemaBuilder.addField(
             Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col)));
@@ -652,15 +684,6 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       }
 
       return Row.withSchema(schemaBuilder.build()).addValues(values).build();
-    }
-
-    private DataGeneratorColumn findColumn(DataGeneratorTable table, String colName) {
-      for (DataGeneratorColumn c : table.columns()) {
-        if (c.name().equals(colName)) {
-          return c;
-        }
-      }
-      return null;
     }
 
     private void scheduleEvent(
@@ -724,11 +747,11 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     /**
-     * Stable string form of a value for hashing / state-keying. {@code Object.toString()} is not
+     * Stable string form of a value for state-keying. {@code Object.toString()} is not
      * deterministic for {@code byte[]} or {@code ByteBuffer} (it returns the JVM-assigned object
-     * id like {@code "[B@6a5fc7f7"}), which would make {@link #stableHash} and {@link
-     * #stateKeyOf} produce different keys for the same logical PK across workers or restarts.
-     * Hex-encode byte arrays so the canonical form is identical everywhere.
+     * id like {@code "[B@6a5fc7f7"}), which would make {@link #stateKeyOf} produce different keys
+     * for the same logical PK across workers or restarts. Hex-encode byte arrays so the canonical
+     * form is identical everywhere.
      */
     private static String canonicalizeValue(Object v) {
       if (v == null) {
@@ -768,6 +791,7 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
 
     @OnTimer("eventTimer")
     public void onTimer(
+        OnTimerContext c,
         @StateId("activeKeys") MapState<String, Row> activeKeys,
         @StateId("eventQueue") MapState<Long, List<LifecycleEvent>> eventQueueState,
         @StateId("activeTimestamps")
@@ -775,8 +799,19 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         @StateId("tableMapState") MapState<String, DataGeneratorTable> tableMapState,
         @TimerId("eventTimer") Timer eventTimer) {
 
+      // Defensive: timer fires can race with a worker restart that skipped @StartBundle for this
+      // bundle (rare but observed under autoscale). Initialize lazily so we never NPE on the
+      // pendingDlq list below.
+      if (pendingDlq == null) {
+        pendingDlq = new ArrayList<>();
+      }
+      if (buffers == null) {
+        buffers = new HashMap<>();
+      }
+
       List<Long> timestamps = activeTimestamps.read();
       if (timestamps == null || timestamps.isEmpty()) {
+        drainPendingDlq(c::output);
         return;
       }
 
@@ -793,7 +828,18 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
             // FK-dangling windows.
             List<LifecycleEvent> ordered = orderEventsForTick(events, tableMapState);
             for (LifecycleEvent event : ordered) {
-              processEvent(event, activeKeys, eventTimer, tableMapState);
+              try {
+                processEvent(event, activeKeys, eventTimer, tableMapState);
+              } catch (Exception genError) {
+                LOG.error(
+                    "Lifecycle event generation failed for table {} ({})",
+                    event.tableName,
+                    event.type,
+                    genError);
+                generationFailures.inc();
+                pendingDlq.add(
+                    FailureRecord.toJson(event.tableName, event.type, null, genError));
+              }
             }
             eventQueueState.remove(ts);
           }
@@ -810,6 +856,8 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       if (!timestamps.isEmpty()) {
         eventTimer.set(org.joda.time.Instant.ofEpochMilli(timestamps.get(0)));
       }
+
+      drainPendingDlq(c::output);
     }
 
     /**
@@ -933,17 +981,32 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       Set<String> uniqueColumns = uniqueColumnNames(table);
 
       for (DataGeneratorColumn col : table.columns()) {
+        if (col.skip()) {
+          continue;
+        }
         schemaBuilder.addField(
             Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col)));
         if (col.isPrimaryKey()) {
           values.add(pkValues.get(col.name()));
-        } else if (fkColumns.contains(col.name()) || uniqueColumns.contains(col.name())) {
+        } else if (uniqueColumns.contains(col.name())) {
+          // Unique columns must NOT churn on UPDATE. Preserve the original inserted value from
+          // state, same treatment PKs get via {@code pkValues}. Re-deriving would either
+          // collide with another row's existing unique value (violating the constraint) or
+          // change the row's logical identity between updates. {@code createReducedRow}
+          // guarantees every unique column is written into {@code activeKeys} state at INSERT
+          // time, so {@code originalRow} should always carry the field; if it doesn't, emit
+          // {@code null} and let the sink surface the constraint error rather than silently
+          // mutating the value.
+          Object originalVal =
+              (originalRow != null && originalRow.getSchema().hasField(col.name()))
+                  ? originalRow.getValue(col.name())
+                  : null;
+          values.add(originalVal);
+        } else if (fkColumns.contains(col.name())) {
           Object val =
               originalRow != null && originalRow.getSchema().hasField(col.name())
                   ? originalRow.getValue(col.name())
-                  : uniqueColumns.contains(col.name())
-                      ? deriveUniqueValue(col, table.name(), pkValues)
-                      : generateValue(col);
+                  : generateValue(col);
           values.add(val);
         } else {
           values.add(generateValue(col));
@@ -957,6 +1020,9 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       List<Object> values = new ArrayList<>();
 
       for (DataGeneratorColumn col : table.columns()) {
+        if (col.skip()) {
+          continue;
+        }
         Schema.FieldType fieldType = DataGeneratorUtils.mapToBeamFieldType(col);
         if (col.isPrimaryKey()) {
           schemaBuilder.addField(Schema.Field.of(col.name(), fieldType));
@@ -983,6 +1049,9 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       Set<String> uniqueColumns = uniqueColumnNames(table);
 
       for (DataGeneratorColumn col : table.columns()) {
+        if (col.skip()) {
+          continue;
+        }
         if (col.isPrimaryKey()
             || fkColumns.contains(col.name())
             || uniqueColumns.contains(col.name())) {
@@ -1054,11 +1123,22 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     @FinishBundle
-    public void finishBundle() {
+    public void finishBundle(FinishBundleContext c) {
       // Fix A / B: final flush must respect DAG order.
       flushInsertsInTopoOrder();
       flushUpdates();
       flushDeletesInReverseTopoOrder();
+
+      // FinishBundle has no element-time so we stamp the DLQ records with wall-clock time. The
+      // downstream WriteFailuresToGcs windowing only cares about the relative ordering and a
+      // bounded skew, so processing-time-ish stamps are appropriate here.
+      if (pendingDlq != null && !pendingDlq.isEmpty()) {
+        Instant now = Instant.now();
+        for (String record : pendingDlq) {
+          c.output(record, now, GlobalWindow.INSTANCE);
+        }
+        pendingDlq.clear();
+      }
     }
 
     @Teardown
@@ -1137,13 +1217,31 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       DataGeneratorTable table = bv != null ? bv.table : null;
 
       if (batch != null && !batch.isEmpty()) {
-        writer.write(batch, table, shardId, operation);
-        batchesWritten.inc();
-        recordsWritten.inc(batch.size());
-        if (!shardId.isEmpty()) {
-          Metrics.counter(BatchAndWriteFn.class, "recordsWritten_" + shardId).inc(batch.size());
+        try {
+          writer.write(batch, table, shardId, operation);
+          batchesWritten.inc();
+          recordsWritten.inc(batch.size());
+          if (!shardId.isEmpty()) {
+            Metrics.counter(BatchAndWriteFn.class, "recordsWritten_" + shardId).inc(batch.size());
+          }
+        } catch (Exception writeError) {
+          // Sink rejected the whole batch. Emit one DLQ record per row so callers see exactly
+          // which rows did not land. Do NOT rethrow — that would make Beam retry the entire
+          // bundle (including non-failing buffers) and potentially loop forever on a poison
+          // record. The DLQ + counter is the contract operators rely on for visibility.
+          LOG.error(
+              "Sink write failed for table {} ({}), {} rows routed to DLQ",
+              tableName,
+              operation,
+              batch.size(),
+              writeError);
+          writeFailures.inc(batch.size());
+          for (Row r : batch) {
+            pendingDlq.add(FailureRecord.toJson(tableName, operation, r, writeError));
+          }
+        } finally {
+          batch.clear();
         }
-        batch.clear();
       }
       // Drop empty buffer entry to avoid linearly scanning it on subsequent flushes.
       if (bv != null && bv.rows.isEmpty()) {
@@ -1152,30 +1250,24 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
     }
 
     /**
-     * Completes a partial row by generating any missing columns. Unique columns get a
-     * deterministic value derived from PK + column name so two generations of the same PK in
-     * different workers cannot collide.
+     * Completes a partial row by generating any missing columns through {@link
+     * DataGeneratorUtils#generateValue}. Every column — including those under a unique constraint —
+     * is produced uniformly via the same value generator; collisions on unique columns are handled
+     * by the sink's upsert semantics, not by ad-hoc derivation here.
      */
     private Row completeRow(DataGeneratorTable table, Row partialRow, String shardIdHint) {
       boolean hasAllColumns = true;
       for (DataGeneratorColumn col : table.columns()) {
+        if (col.skip()) {
+          continue;
+        }
         if (!partialRow.getSchema().hasField(col.name())) {
           hasAllColumns = false;
           break;
         }
       }
 
-      // Precompute PK map from partialRow (or from columns we're about to generate).
-      LinkedHashMap<String, Object> pkMap = new LinkedHashMap<>();
-      for (DataGeneratorColumn col : table.columns()) {
-        if (col.isPrimaryKey() && partialRow.getSchema().hasField(col.name())) {
-          pkMap.put(col.name(), partialRow.getValue(col.name()));
-        }
-      }
-
-      Set<String> uniqueCols = uniqueColumnNames(table);
-
-      if (hasAllColumns && !needsUniqueRewrite(table, partialRow, uniqueCols)) {
+      if (hasAllColumns) {
         return partialRow;
       }
 
@@ -1188,13 +1280,12 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       Schema.Builder schemaBuilder = Schema.builder();
 
       for (DataGeneratorColumn col : table.columns()) {
+        if (col.skip()) {
+          continue;
+        }
         Object val = currentValues.get(col.name());
         if (val == null) {
-          if (uniqueCols.contains(col.name())) {
-            val = deriveUniqueValue(col, table.name(), pkMap);
-          } else {
-            val = generateValue(col);
-          }
+          val = generateValue(col);
         }
         schemaBuilder.addField(
             Schema.Field.of(col.name(), DataGeneratorUtils.mapToBeamFieldType(col)));
@@ -1217,18 +1308,6 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
       return Row.withSchema(schemaBuilder.build()).addValues(values).build();
     }
 
-    /**
-     * True if any unique column on the partialRow was produced by a generic random generator
-     * upstream (no PK-derived hashing), in which case we overwrite it with a collision-safe value.
-     * Today we don't have enough signal to detect that at the row level, so we defer to the
-     * ordinary column-missing path (only rewrite when missing).
-     */
-    private boolean needsUniqueRewrite(
-        DataGeneratorTable table, Row partialRow, Set<String> uniqueCols) {
-      // Future hook: check column-level metadata marking "collision-unsafe" provenance.
-      return false;
-    }
-
     private Object generateValue(DataGeneratorColumn column) {
       return DataGeneratorUtils.generateValue(column, faker);
     }
@@ -1242,85 +1321,6 @@ public class BatchAndWrite extends PTransform<PCollection<KV<String, Row>>, PDon
         }
       }
       return uniqueColumns;
-    }
-
-    /**
-     * Deterministic, collision-free value for a unique column, derived from {@code (table,
-     * column, pkValues)}. Because PKs are unique per row, the derived value is also unique —
-     * regardless of how many workers generate in parallel.
-     */
-    private Object deriveUniqueValue(
-        DataGeneratorColumn col, String tableName, Map<String, Object> pkValues) {
-      long hash = stableHash(tableName, col.name(), pkValues);
-      com.google.cloud.teleport.v2.templates.model.LogicalType lt = col.logicalType();
-      switch (lt) {
-        case INT64:
-          return hash;
-        case BOOLEAN:
-          return (hash & 1L) == 1L;
-        case FLOAT64:
-        case NUMERIC:
-          return ((double) hash) / Long.MAX_VALUE;
-        case BYTES:
-          return longToBytes(hash);
-        case DATE:
-          // Derive a stable date from hash; unique per row.
-          return java.time.LocalDate.ofEpochDay(Math.floorMod(hash, 36525L));
-        case TIMESTAMP:
-          return org.joda.time.Instant.ofEpochMilli(Math.floorMod(hash, 4102444800000L));
-        case UUID:
-          // Valid 8-4-4-4-12 hex form is required by Postgres/Spanner UUID columns. Build a
-          // deterministic UUID from the 64-bit hash so uniqueness tracks the row's PKs.
-          return new java.util.UUID(hash, Long.reverse(hash)).toString();
-        case JSON:
-          // Wrap the hash in a valid JSON object so columns with a JSON unique constraint get a
-          // valid document, not a bare string.
-          return "{\"uid\":\"" + Long.toHexString(hash) + "\"}";
-        case STRING:
-        case ENUM:
-        default:
-          // Fit within declared size when known.
-          String base = tableName + "_" + col.name() + "_" + Long.toHexString(hash);
-          if (col.size() != null && col.size() > 0 && base.length() > col.size()) {
-            return base.substring(0, (int) Math.min(base.length(), col.size().longValue()));
-          }
-          return base;
-      }
-    }
-
-    private static byte[] longToBytes(long v) {
-      byte[] out = new byte[8];
-      for (int i = 7; i >= 0; i--) {
-        out[i] = (byte) (v & 0xff);
-        v >>= 8;
-      }
-      return out;
-    }
-
-    private static long stableHash(String tableName, String colName, Map<String, Object> pkValues) {
-      // 64-bit FNV-1a — deterministic across JVMs/workers.
-      long h = 0xcbf29ce484222325L;
-      h = fnv(h, tableName);
-      h = fnv(h, "|");
-      h = fnv(h, colName);
-      h = fnv(h, "|");
-      if (pkValues != null) {
-        for (Map.Entry<String, Object> e : pkValues.entrySet()) {
-          h = fnv(h, e.getKey());
-          h = fnv(h, "=");
-          h = fnv(h, canonicalizeValue(e.getValue()));
-          h = fnv(h, ";");
-        }
-      }
-      return h;
-    }
-
-    private static long fnv(long h, String s) {
-      for (int i = 0; i < s.length(); i++) {
-        h ^= s.charAt(i);
-        h *= 0x100000001b3L;
-      }
-      return h;
     }
 
     /**

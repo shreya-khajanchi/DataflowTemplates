@@ -201,4 +201,363 @@ public class SchemaLoaderTest {
     DoFn.OutputReceiver<DataGeneratorSchema> receiver = mock(DoFn.OutputReceiver.class);
     assertThrows(RuntimeException.class, () -> fn.processElement(receiver));
   }
+
+  // ---------- Helpers / fixtures for override tests ----------
+
+  private static com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn pkCol(
+      String name) {
+    return com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn.builder()
+        .name(name)
+        .logicalType(LogicalType.INT64)
+        .isPrimaryKey(true)
+        .isNullable(false)
+        .isGenerated(false)
+        .originalType("INT64")
+        .build();
+  }
+
+  private static com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn dataCol(
+      String name, LogicalType type) {
+    return com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn.builder()
+        .name(name)
+        .logicalType(type)
+        .isPrimaryKey(false)
+        .isNullable(true)
+        .isGenerated(false)
+        .originalType(type.name())
+        .build();
+  }
+
+  private static com.google.cloud.teleport.v2.templates.model.DataGeneratorTable simpleTable(
+      String name,
+      com.google.common.collect.ImmutableList<
+              com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn>
+          columns,
+      com.google.common.collect.ImmutableList<
+              com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey>
+          fks) {
+    return com.google.cloud.teleport.v2.templates.model.DataGeneratorTable.builder()
+        .name(name)
+        .columns(columns)
+        .primaryKeys(com.google.common.collect.ImmutableList.of("id"))
+        .foreignKeys(fks)
+        .uniqueKeys(com.google.common.collect.ImmutableList.of())
+        .insertQps(1)
+        .isRoot(true)
+        .build();
+  }
+
+  private static FetchSchemaFn fnReturning(DataGeneratorSchema schema, String configJson) {
+    final SinkSchemaFetcher mockFetcher = mock(SinkSchemaFetcher.class);
+    when(mockFetcher.getSchema()).thenReturn(schema);
+    return new FetchSchemaFn(SinkType.MYSQL, "options", null, "schema_config.json") {
+      @Override
+      protected SinkSchemaFetcher createFetcher(SinkType sinkType) {
+        return mockFetcher;
+      }
+
+      @Override
+      protected String readSinkOptions(String path) throws IOException {
+        if ("schema_config.json".equals(path)) {
+          return configJson;
+        }
+        return "{}";
+      }
+    };
+  }
+
+  // ---------- Generator + skip overrides ----------
+
+  /**
+   * A column-level override that sets {@code generator} and {@code skip:false} should land on the
+   * resolved column. The bare directive form (without {@code #{...}}) must be normalised.
+   */
+  @Test
+  public void testApplyOverrides_normalisesGeneratorAndSetsSkip() throws IOException {
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .tables(
+                com.google.common.collect.ImmutableMap.of(
+                    "users",
+                    simpleTable(
+                        "users",
+                        com.google.common.collect.ImmutableList.of(
+                            pkCol("id"),
+                            dataCol("name", LogicalType.STRING),
+                            dataCol("blob", LogicalType.BYTES)),
+                        com.google.common.collect.ImmutableList.of())))
+            .dialect(SinkDialect.MYSQL)
+            .build();
+
+    String config =
+        "{\"tables\":[{\"tableName\":\"users\",\"columns\":{"
+            + "\"name\":{\"generator\":\"name.fullName\"},"
+            + "\"blob\":{\"skip\":true}"
+            + "}}]}";
+
+    DoFn.OutputReceiver<DataGeneratorSchema> receiver = mock(DoFn.OutputReceiver.class);
+    org.mockito.ArgumentCaptor<DataGeneratorSchema> captor =
+        org.mockito.ArgumentCaptor.forClass(DataGeneratorSchema.class);
+    fnReturning(schema, config).processElement(receiver);
+    verify(receiver).output(captor.capture());
+
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorTable resolved =
+        captor.getValue().tables().get("users");
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn name =
+        resolved.columns().stream().filter(c -> c.name().equals("name")).findFirst().get();
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn blob =
+        resolved.columns().stream().filter(c -> c.name().equals("blob")).findFirst().get();
+    assertEquals("#{name.fullName}", name.generator());
+    assertEquals(true, blob.skip());
+  }
+
+  /** A pre-wrapped {@code #{...}} expression must pass through unchanged. */
+  @Test
+  public void testApplyOverrides_passesThroughAlreadyWrappedExpression() throws IOException {
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .tables(
+                com.google.common.collect.ImmutableMap.of(
+                    "users",
+                    simpleTable(
+                        "users",
+                        com.google.common.collect.ImmutableList.of(
+                            pkCol("id"), dataCol("name", LogicalType.STRING)),
+                        com.google.common.collect.ImmutableList.of())))
+            .dialect(SinkDialect.MYSQL)
+            .build();
+
+    String config =
+        "{\"tables\":[{\"tableName\":\"users\",\"columns\":{"
+            + "\"name\":{\"generator\":\"#{name.fullName}\"}"
+            + "}}]}";
+
+    DoFn.OutputReceiver<DataGeneratorSchema> receiver = mock(DoFn.OutputReceiver.class);
+    org.mockito.ArgumentCaptor<DataGeneratorSchema> captor =
+        org.mockito.ArgumentCaptor.forClass(DataGeneratorSchema.class);
+    fnReturning(schema, config).processElement(receiver);
+    verify(receiver).output(captor.capture());
+
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorColumn name =
+        captor.getValue().tables().get("users").columns().stream()
+            .filter(c -> c.name().equals("name"))
+            .findFirst()
+            .get();
+    assertEquals("#{name.fullName}", name.generator());
+  }
+
+  /** {@code skip=true} on a primary-key column must be rejected loudly at config load. */
+  @Test
+  public void testApplyOverrides_rejectsSkipOnPrimaryKey() {
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .tables(
+                com.google.common.collect.ImmutableMap.of(
+                    "users",
+                    simpleTable(
+                        "users",
+                        com.google.common.collect.ImmutableList.of(pkCol("id")),
+                        com.google.common.collect.ImmutableList.of())))
+            .dialect(SinkDialect.MYSQL)
+            .build();
+
+    String config =
+        "{\"tables\":[{\"tableName\":\"users\",\"columns\":{"
+            + "\"id\":{\"skip\":true}"
+            + "}}]}";
+
+    DoFn.OutputReceiver<DataGeneratorSchema> receiver = mock(DoFn.OutputReceiver.class);
+    RuntimeException ex =
+        assertThrows(
+            RuntimeException.class, () -> fnReturning(schema, config).processElement(receiver));
+    org.junit.Assert.assertTrue(
+        "Expected error message to name the PK column",
+        ex.getMessage().contains("primary-key column 'id'") || ex.getCause() != null);
+  }
+
+  // ---------- Foreign-key overrides ----------
+
+  /** Adding a previously-undiscovered FK appends it to the table's FK list. */
+  @Test
+  public void testApplyOverrides_addsNewForeignKey() throws IOException {
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .tables(
+                com.google.common.collect.ImmutableMap.of(
+                    "orders",
+                    simpleTable(
+                        "orders",
+                        com.google.common.collect.ImmutableList.of(
+                            pkCol("id"), dataCol("user_id", LogicalType.INT64)),
+                        com.google.common.collect.ImmutableList.of()),
+                    "users",
+                    simpleTable(
+                        "users",
+                        com.google.common.collect.ImmutableList.of(pkCol("id")),
+                        com.google.common.collect.ImmutableList.of())))
+            .dialect(SinkDialect.MYSQL)
+            .build();
+
+    String config =
+        "{\"tables\":[{\"tableName\":\"orders\",\"foreignKeys\":["
+            + "{\"name\":\"fk_orders_user\",\"referencedTable\":\"users\","
+            + "\"keyColumns\":[\"user_id\"],\"referencedColumns\":[\"id\"]}"
+            + "]}]}";
+
+    DoFn.OutputReceiver<DataGeneratorSchema> receiver = mock(DoFn.OutputReceiver.class);
+    org.mockito.ArgumentCaptor<DataGeneratorSchema> captor =
+        org.mockito.ArgumentCaptor.forClass(DataGeneratorSchema.class);
+    fnReturning(schema, config).processElement(receiver);
+    verify(receiver).output(captor.capture());
+
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorTable resolved =
+        captor.getValue().tables().get("orders");
+    assertEquals(1, resolved.foreignKeys().size());
+    assertEquals("fk_orders_user", resolved.foreignKeys().get(0).name());
+    assertEquals("users", resolved.foreignKeys().get(0).referencedTable());
+  }
+
+  /**
+   * A discovered FK that doesn't appear in the config must remain on the table — the merge is by
+   * NAME, not "replace all when foreignKeys is present."
+   */
+  @Test
+  public void testApplyOverrides_preservesDiscoveredFkNotInConfig() throws IOException {
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey discovered =
+        com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey.builder()
+            .name("fk_existing")
+            .referencedTable("parents")
+            .keyColumns(com.google.common.collect.ImmutableList.of("parent_id"))
+            .referencedColumns(com.google.common.collect.ImmutableList.of("id"))
+            .build();
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .tables(
+                com.google.common.collect.ImmutableMap.of(
+                    "children",
+                    simpleTable(
+                        "children",
+                        com.google.common.collect.ImmutableList.of(
+                            pkCol("id"),
+                            dataCol("parent_id", LogicalType.INT64),
+                            dataCol("user_id", LogicalType.INT64)),
+                        com.google.common.collect.ImmutableList.of(discovered))))
+            .dialect(SinkDialect.MYSQL)
+            .build();
+
+    String config =
+        "{\"tables\":[{\"tableName\":\"children\",\"foreignKeys\":["
+            + "{\"name\":\"fk_new\",\"referencedTable\":\"users\","
+            + "\"keyColumns\":[\"user_id\"],\"referencedColumns\":[\"id\"]}"
+            + "]}]}";
+
+    DoFn.OutputReceiver<DataGeneratorSchema> receiver = mock(DoFn.OutputReceiver.class);
+    org.mockito.ArgumentCaptor<DataGeneratorSchema> captor =
+        org.mockito.ArgumentCaptor.forClass(DataGeneratorSchema.class);
+    fnReturning(schema, config).processElement(receiver);
+    verify(receiver).output(captor.capture());
+
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorTable resolved =
+        captor.getValue().tables().get("children");
+    java.util.Set<String> fkNames =
+        resolved.foreignKeys().stream()
+            .map(
+                com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey::name)
+            .collect(java.util.stream.Collectors.toSet());
+    org.junit.Assert.assertEquals(
+        com.google.common.collect.ImmutableSet.of("fk_existing", "fk_new"), fkNames);
+  }
+
+  /**
+   * A config FK with the same name but a different definition than the discovered one must throw,
+   * naming the conflicting fields. This protects users from silently picking either side.
+   */
+  @Test
+  public void testApplyOverrides_throwsOnConflictingForeignKey() {
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey discovered =
+        com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey.builder()
+            .name("fk_orders_user")
+            .referencedTable("users")
+            .keyColumns(com.google.common.collect.ImmutableList.of("user_id"))
+            .referencedColumns(com.google.common.collect.ImmutableList.of("id"))
+            .build();
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .tables(
+                com.google.common.collect.ImmutableMap.of(
+                    "orders",
+                    simpleTable(
+                        "orders",
+                        com.google.common.collect.ImmutableList.of(
+                            pkCol("id"),
+                            dataCol("user_id", LogicalType.INT64),
+                            dataCol("alt_user_id", LogicalType.INT64)),
+                        com.google.common.collect.ImmutableList.of(discovered))))
+            .dialect(SinkDialect.MYSQL)
+            .build();
+
+    String config =
+        "{\"tables\":[{\"tableName\":\"orders\",\"foreignKeys\":["
+            + "{\"name\":\"fk_orders_user\",\"referencedTable\":\"users\","
+            + "\"keyColumns\":[\"alt_user_id\"],\"referencedColumns\":[\"id\"]}"
+            + "]}]}";
+
+    DoFn.OutputReceiver<DataGeneratorSchema> receiver = mock(DoFn.OutputReceiver.class);
+    RuntimeException ex =
+        assertThrows(
+            RuntimeException.class, () -> fnReturning(schema, config).processElement(receiver));
+    org.junit.Assert.assertTrue(
+        "Expected error to mention the FK name",
+        rootMessage(ex).contains("fk_orders_user"));
+    org.junit.Assert.assertTrue(
+        "Expected error to mention the conflicting columns",
+        rootMessage(ex).contains("alt_user_id") || rootMessage(ex).contains("user_id"));
+  }
+
+  /**
+   * A config FK with the same name and identical definition is a no-op (idempotent re-declaration
+   * of a discovered FK). Should not throw.
+   */
+  @Test
+  public void testApplyOverrides_acceptsIdenticalForeignKey() throws IOException {
+    com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey discovered =
+        com.google.cloud.teleport.v2.templates.model.DataGeneratorForeignKey.builder()
+            .name("fk_orders_user")
+            .referencedTable("users")
+            .keyColumns(com.google.common.collect.ImmutableList.of("user_id"))
+            .referencedColumns(com.google.common.collect.ImmutableList.of("id"))
+            .build();
+    DataGeneratorSchema schema =
+        DataGeneratorSchema.builder()
+            .tables(
+                com.google.common.collect.ImmutableMap.of(
+                    "orders",
+                    simpleTable(
+                        "orders",
+                        com.google.common.collect.ImmutableList.of(
+                            pkCol("id"), dataCol("user_id", LogicalType.INT64)),
+                        com.google.common.collect.ImmutableList.of(discovered))))
+            .dialect(SinkDialect.MYSQL)
+            .build();
+
+    String config =
+        "{\"tables\":[{\"tableName\":\"orders\",\"foreignKeys\":["
+            + "{\"name\":\"fk_orders_user\",\"referencedTable\":\"users\","
+            + "\"keyColumns\":[\"user_id\"],\"referencedColumns\":[\"id\"]}"
+            + "]}]}";
+
+    DoFn.OutputReceiver<DataGeneratorSchema> receiver = mock(DoFn.OutputReceiver.class);
+    fnReturning(schema, config).processElement(receiver);
+    // No throw is the assertion.
+    verify(receiver).output(org.mockito.ArgumentMatchers.any(DataGeneratorSchema.class));
+  }
+
+  /** Walks a Throwable chain so an assertion can match the deepest "real" message. */
+  private static String rootMessage(Throwable t) {
+    Throwable cur = t;
+    while (cur.getCause() != null && cur.getCause() != cur) {
+      cur = cur.getCause();
+    }
+    return cur.getMessage() == null ? "" : cur.getMessage();
+  }
 }

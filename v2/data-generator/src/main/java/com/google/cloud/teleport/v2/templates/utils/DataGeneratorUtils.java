@@ -30,6 +30,14 @@ public class DataGeneratorUtils {
   /**
    * Generates a random value for the given column using the provided Faker instance.
    *
+   * <p>If the column carries a custom {@code generator} (a normalised Faker expression), it is
+   * evaluated via {@link Faker#expression(String)} and the resulting String is coerced into the
+   * column's logical type. {@link Faker#expression(String)} always returns a String regardless of
+   * the underlying directive, so coercion is mandatory for non-string types. Coercion failure
+   * (e.g. an INT64 column with a generator that emits non-numeric output) throws a {@link
+   * RuntimeException} which the caller is expected to route to the dead-letter queue rather than
+   * crashing the bundle.
+   *
    * @param column The column definition.
    * @param faker The Faker instance to use.
    * @return The generated value.
@@ -37,6 +45,10 @@ public class DataGeneratorUtils {
   public static Object generateValue(DataGeneratorColumn column, Faker faker) {
     LogicalType type = column.logicalType();
     Long size = column.size();
+
+    if (column.generator() != null && !column.generator().isEmpty()) {
+      return generateFromExpression(column, faker);
+    }
 
     switch (type) {
       case STRING:
@@ -103,6 +115,92 @@ public class DataGeneratorUtils {
         return arrayList;
       default:
         return "unknown";
+    }
+  }
+
+  /**
+   * Evaluates a user-provided Faker expression and coerces the resulting String into the column's
+   * logical type.
+   *
+   * <p>{@link Faker#expression(String)} returns a String even when the directive is conceptually
+   * typed (e.g. {@code number.numberBetween} returns a long internally but is surfaced as a
+   * decimal-string). For columns whose logical type isn't STRING, parsing is the only way to
+   * recover the typed value.
+   *
+   * <p>For ENUM and ARRAY logical types we fall back to the random generator — the user-facing
+   * coercion contract for those is fuzzier and the randomised path is type-safe by construction.
+   */
+  static Object generateFromExpression(DataGeneratorColumn column, Faker faker) {
+    String expression = column.generator();
+    String raw;
+    try {
+      raw = faker.expression(expression);
+    } catch (Exception e) {
+      throw new RuntimeException(
+          "Faker expression for column '"
+              + column.name()
+              + "' failed to evaluate: "
+              + expression,
+          e);
+    }
+    if (raw == null) {
+      return null;
+    }
+    return coerceToLogicalType(raw, column);
+  }
+
+  private static Object coerceToLogicalType(String raw, DataGeneratorColumn column) {
+    LogicalType type = column.logicalType();
+    try {
+      switch (type) {
+        case STRING:
+        case JSON:
+        case UUID:
+        case ENUM:
+          return raw;
+        case INT64:
+          return Long.parseLong(raw.trim());
+        case FLOAT64:
+          return Double.parseDouble(raw.trim());
+        case NUMERIC:
+          {
+            BigDecimal bd = new BigDecimal(raw.trim());
+            int sc = (column.scale() != null && column.scale() >= 0) ? column.scale() : 2;
+            return bd.setScale(sc, java.math.RoundingMode.HALF_UP);
+          }
+        case BOOLEAN:
+          {
+            String lower = raw.trim().toLowerCase();
+            if ("true".equals(lower) || "false".equals(lower)) {
+              return Boolean.parseBoolean(lower);
+            }
+            throw new IllegalArgumentException("not a boolean: " + raw);
+          }
+        case BYTES:
+          return raw.getBytes(StandardCharsets.UTF_8);
+        case DATE:
+          return new Instant(java.time.LocalDate.parse(raw.trim()).toEpochDay() * 86400000L);
+        case TIMESTAMP:
+          return new Instant(java.time.Instant.parse(raw.trim()).toEpochMilli());
+        case ARRAY:
+          // Array generators are not supported; element-level expressions would require a
+          // different config shape. Fall back to the random array path.
+          return null;
+        default:
+          return raw;
+      }
+    } catch (NumberFormatException | IllegalArgumentException | java.time.DateTimeException e) {
+      throw new RuntimeException(
+          "Generator output for column '"
+              + column.name()
+              + "' did not parse as "
+              + type
+              + ": got '"
+              + raw
+              + "' from expression '"
+              + column.generator()
+              + "'",
+          e);
     }
   }
 

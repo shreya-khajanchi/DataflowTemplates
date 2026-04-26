@@ -136,7 +136,15 @@ public class MySqlDataWriter implements DataWriter {
     StringBuilder sql = new StringBuilder("INSERT INTO ");
     sql.append(table.name()).append(" (");
 
-    List<DataGeneratorColumn> columns = table.columns();
+    // skip=true columns are intentionally absent from the row (see SchemaLoader / BatchAndWrite),
+    // so they must also be absent from the INSERT column list. The sink applies its DEFAULT (or
+    // NULL) for them. Filtering on the writer side keeps the SQL aligned with the row schema
+    // exactly — relying on the row's getSchema() instead would mix in shard_id and other
+    // synthetic fields.
+    List<DataGeneratorColumn> columns =
+        table.columns().stream()
+            .filter(c -> !c.skip())
+            .collect(java.util.stream.Collectors.toList());
     for (int i = 0; i < columns.size(); i++) {
       sql.append(columns.get(i).name());
       if (i < columns.size() - 1) {
@@ -162,6 +170,9 @@ public class MySqlDataWriter implements DataWriter {
     List<DataGeneratorColumn> columns = table.columns();
     boolean first = true;
     for (DataGeneratorColumn col : columns) {
+      if (col.skip()) {
+        continue;
+      }
       if (!col.isPrimaryKey()) {
         if (!first) {
           sql.append(", ");
@@ -173,6 +184,12 @@ public class MySqlDataWriter implements DataWriter {
     sql.append(" WHERE ");
     first = true;
     for (DataGeneratorColumn col : columns) {
+      // PK columns are never skipped (SchemaLoader rejects that at config time), so the WHERE
+      // clause iteration doesn't need a skip filter — but an explicit one keeps this method
+      // resilient if that invariant ever changes.
+      if (col.skip()) {
+        continue;
+      }
       if (col.isPrimaryKey()) {
         if (!first) {
           sql.append(" AND ");
@@ -191,6 +208,9 @@ public class MySqlDataWriter implements DataWriter {
     List<DataGeneratorColumn> columns = table.columns();
     boolean first = true;
     for (DataGeneratorColumn col : columns) {
+      if (col.skip()) {
+        continue;
+      }
       if (col.isPrimaryKey()) {
         if (!first) {
           sql.append(" AND ");
@@ -205,7 +225,12 @@ public class MySqlDataWriter implements DataWriter {
   private void setStatementParameters(
       PreparedStatement statement, Row row, DataGeneratorTable table, String operation)
       throws SQLException {
-    List<DataGeneratorColumn> columns = table.columns();
+    // Iterate in the same skip-aware order as the SQL builders so positional `?` placeholders
+    // line up with the values being bound.
+    List<DataGeneratorColumn> columns =
+        table.columns().stream()
+            .filter(c -> !c.skip())
+            .collect(java.util.stream.Collectors.toList());
     if (Constants.MUTATION_UPDATE.equalsIgnoreCase(operation)) {
       int idx = 1;
       // Set non-PK columns first

@@ -132,6 +132,19 @@ public interface DataGeneratorOptions extends CommonTemplateOptions, GcpOptions,
 
   void setSchemaConfig(String value);
 
+  @TemplateParameter.GcsWriteFolder(
+      order = 11,
+      optional = true,
+      description = "Dead Letter Queue Directory",
+      helpText =
+          "GCS directory for the dead letter queue. Records that fail during data generation"
+              + " or while being written to the sink are serialized as JSON and persisted under"
+              + " this prefix. When unset, failure records are logged but not written anywhere.",
+      example = "gs://your-bucket/dlq/")
+  String getDeadLetterQueueDirectory();
+
+  void setDeadLetterQueueDirectory(String value);
+
   enum SinkType {
     SPANNER,
     MYSQL

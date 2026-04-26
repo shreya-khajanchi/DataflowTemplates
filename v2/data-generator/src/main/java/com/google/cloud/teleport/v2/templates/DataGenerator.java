@@ -25,6 +25,7 @@ import com.google.cloud.teleport.v2.templates.transforms.GeneratePrimaryKey;
 import com.google.cloud.teleport.v2.templates.transforms.GenerateTicks;
 import com.google.cloud.teleport.v2.templates.transforms.SchemaLoader;
 import com.google.cloud.teleport.v2.templates.transforms.SelectTable;
+import com.google.cloud.teleport.v2.templates.transforms.WriteFailuresToGcs;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
@@ -127,13 +128,23 @@ public class DataGenerator {
                     }))
             .apply("Reshuffle", Reshuffle.of());
 
-    reshuffledRows.apply(
-        "BatchAndWrite",
-        new BatchAndWrite(
-            options.getSinkType().name(),
-            options.getSinkOptions(),
-            options.getBatchSize(),
-            schemaView));
+    PCollection<String> dlqRecords =
+        reshuffledRows.apply(
+            "BatchAndWrite",
+            new BatchAndWrite(
+                options.getSinkType().name(),
+                options.getSinkOptions(),
+                options.getBatchSize(),
+                schemaView));
+
+    // Route generation/sink-write failures to GCS when a DLQ directory is configured. When unset,
+    // the failure records are still emitted on the DLQ PCollection but nothing consumes them, so
+    // they're silently dropped. Operators get visibility through the writeFailures /
+    // generationFailures Counters either way.
+    String dlqDirectory = options.getDeadLetterQueueDirectory();
+    if (dlqDirectory != null && !dlqDirectory.isEmpty()) {
+      dlqRecords.apply("WriteFailuresToGcs", new WriteFailuresToGcs(dlqDirectory));
+    }
 
     return pipeline.run();
   }
