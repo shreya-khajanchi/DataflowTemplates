@@ -34,4 +34,17 @@ public final class Constants {
   public static final String SPANNER_CONFIG_PROJECT_ID_KEY = "projectId";
   public static final String SPANNER_CONFIG_INSTANCE_ID_KEY = "instanceId";
   public static final String SPANNER_CONFIG_DATABASE_ID_KEY = "databaseId";
+
+  // Mutation type identifiers used as buffer-key suffixes when batching writes.
+  public static final String MUTATION_INSERT = "INSERT";
+  public static final String MUTATION_UPDATE = "UPDATE";
+  public static final String MUTATION_DELETE = "DELETE";
+
+  // Synthetic column name carried on rows so that lifecycle events can be routed back to the
+  // correct logical shard at write-time. Sinks that are not sharded simply ignore it.
+  public static final String SHARD_ID_COLUMN_NAME = "_dg_shard_id";
+
+  private Constants() {
+    // Prevent instantiation.
+  }
 }
